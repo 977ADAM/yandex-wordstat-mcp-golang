@@ -23,6 +23,7 @@ func main() {
 	if apiKey == "" || folderID == "" {
 		log.Fatal("WORDSTAT_API_KEY and WORDSTAT_FOLDER_ID must be set")
 	}
+	log.Print("Сервер запустился")
 
 	client := wordstat.NewClient(apiKey, folderID)
 
