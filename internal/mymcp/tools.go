@@ -2,18 +2,27 @@ package mymcp
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/977ADAM/yandex-wordstat-mcp-golang/internal/wordstat"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func RegisterTools(server *mcp.Server, client *wordstat.Client) {
+// WordstatClient — то, что инструментам нужно от клиента Wordstat.
+// Интерфейс (а не конкретный тип) позволяет подменять клиент в тестах.
+type WordstatClient interface {
+	TopRequests(ctx context.Context, phrase string, numPhrases int) (*wordstat.TopRequestsResponse, error)
+	Dynamics(ctx context.Context, phrase, period, fromDate, toDate string) (*wordstat.DynamicsResponse, error)
+	Regions(ctx context.Context, phrase, regionMode string) (*wordstat.RegionsResponse, error)
+	RegionsTree(ctx context.Context) (*wordstat.RegionsTreeResponse, error)
+}
+
+// RegisterTools регистрирует четыре инструмента Wordstat на MCP-сервере.
+func RegisterTools(server *mcp.Server, client WordstatClient) {
 
 	// ─── top_requests ──────────────────────────────────────
 	type TopArgs struct {
-		Phrase     string `json:"phrase" jsonschema:"required,Поисковая фраза (например, 'купить кофемашину')"`
-		NumPhrases int    `json:"numPhrases,omitempty" jsonschema:"Количество записей (1..2000), по умолчанию 2000"`
+		Phrase     string `json:"phrase" jsonschema:"Поисковая фраза (например, 'купить кофемашину')"`
+		NumPhrases int    `json:"numPhrases,omitempty" jsonschema:"Сколько фраз вернуть (1..2000), по умолчанию 20"`
 	}
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "top_requests",
@@ -23,60 +32,41 @@ func RegisterTools(server *mcp.Server, client *wordstat.Client) {
 		if err != nil {
 			return nil, nil, err
 		}
-		out := fmt.Sprintf("Фраза: %s\nВсего показов: %s\n\nПопулярные запросы:\n", args.Phrase, res.TotalCount)
-		for _, p := range res.TopRequests {
-			out += fmt.Sprintf("- %s: %s\n", p.Phrase, p.Count)
-		}
-		if len(res.Associations) > 0 {
-			out += "\nПохожие запросы:\n"
-			for _, p := range res.Associations {
-				out += fmt.Sprintf("- %s: %s\n", p.Phrase, p.Count)
-			}
-		}
-		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: out}}}, nil, nil
+		return textResult(formatTopRequests(args.Phrase, res)), nil, nil
 	})
 
 	// ─── dynamics ──────────────────────────────────────────
 	type DynArgs struct {
-		Phrase   string `json:"phrase" jsonschema:"required,Поисковая фраза"`
-		Period   string `json:"period,omitempty" jsonschema:"Детализация: daily, weekly, monthly"`
-		FromDate string `json:"fromDate,omitempty" jsonschema:"Начало (RFC3339)"`
-		ToDate   string `json:"toDate,omitempty" jsonschema:"Конец (RFC3339)"`
+		Phrase   string `json:"phrase" jsonschema:"Поисковая фраза"`
+		Period   string `json:"period,omitempty" jsonschema:"Детализация: daily, weekly, monthly (по умолчанию monthly)"`
+		FromDate string `json:"fromDate,omitempty" jsonschema:"Начало периода, RFC3339 или YYYY-MM-DD. Для monthly — первый день месяца, для weekly — понедельник. По умолчанию — 12 периодов назад"`
+		ToDate   string `json:"toDate,omitempty" jsonschema:"Конец периода, RFC3339 или YYYY-MM-DD. Для monthly — последний день месяца, для weekly — воскресенье. По умолчанию — последний завершённый период"`
 	}
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "dynamics",
-		Description: "Динамика частотности запроса во времени.",
+		Description: "Динамика частотности запроса во времени (день/неделя/месяц).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args DynArgs) (*mcp.CallToolResult, any, error) {
 		res, err := client.Dynamics(ctx, args.Phrase, args.Period, args.FromDate, args.ToDate)
 		if err != nil {
 			return nil, nil, err
 		}
-		out := fmt.Sprintf("Динамика для «%s»:\n", args.Phrase)
-		for _, p := range res.Series {
-			out += fmt.Sprintf("%s: count=%s share=%s\n", p.Date, p.Count, p.Share)
-		}
-		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: out}}}, nil, nil
+		return textResult(formatDynamics(args.Phrase, res)), nil, nil
 	})
 
 	// ─── regions ───────────────────────────────────────────
 	type RegArgs struct {
-		Phrase     string `json:"phrase" jsonschema:"required,Поисковая фраза"`
-		RegionMode string `json:"regionMode,omitempty" jsonschema:"Группировка: all, cities, regions"`
+		Phrase     string `json:"phrase" jsonschema:"Поисковая фраза"`
+		RegionMode string `json:"regionMode,omitempty" jsonschema:"Группировка: all, cities, regions (по умолчанию all)"`
 	}
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "regions",
-		Description: "Распределение спроса по регионам.",
+		Description: "Распределение спроса по регионам за последние 30 дней (с индексом интереса).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args RegArgs) (*mcp.CallToolResult, any, error) {
 		res, err := client.Regions(ctx, args.Phrase, args.RegionMode)
 		if err != nil {
 			return nil, nil, err
 		}
-		out := fmt.Sprintf("Регионы для «%s»:\n", args.Phrase)
-		for _, r := range res.Regions {
-			out += fmt.Sprintf("regionId=%s count=%s share=%s affinity=%s\n",
-				r.RegionID, r.Count, r.Share, r.AffinityIndex)
-		}
-		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: out}}}, nil, nil
+		return textResult(formatRegions(args.Phrase, res)), nil, nil
 	})
 
 	// ─── list_regions ──────────────────────────────────────
@@ -88,15 +78,11 @@ func RegisterTools(server *mcp.Server, client *wordstat.Client) {
 		if err != nil {
 			return nil, nil, err
 		}
-		out := "Регионы:\n"
-		var walk func(nodes []wordstat.RegionNode, depth int)
-		walk = func(nodes []wordstat.RegionNode, depth int) {
-			for _, n := range nodes {
-				out += fmt.Sprintf("%*s%s (id=%s)\n", depth*2, "", n.Name, n.ID)
-				walk(n.Children, depth+1)
-			}
-		}
-		walk(res.Regions, 0)
-		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: out}}}, nil, nil
+		return textResult(formatRegionTree(res)), nil, nil
 	})
+}
+
+// textResult оборачивает текст в результат вызова инструмента.
+func textResult(text string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}
 }

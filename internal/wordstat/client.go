@@ -7,26 +7,36 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"golang.org/x/time/rate"
 )
 
-const baseURL = "https://searchapi.api.cloud.yandex.net/v2/wordstat/"
+const defaultBaseURL = "https://searchapi.api.cloud.yandex.net/v2/wordstat/"
 
+// maxErrBody ограничивает размер тела ошибки API в сообщении.
+const maxErrBody = 512
+
+// Client — клиент Wordstat API (Search API v2).
 type Client struct {
 	apiKey   string
 	folderID string
+	baseURL  string
 	http     *http.Client
 	limiter  *rate.Limiter
+	now      func() time.Time
 }
 
+// NewClient создаёт клиент. folderID обязателен для каждого запроса.
 func NewClient(apiKey, folderID string) *Client {
 	return &Client{
 		apiKey:   apiKey,
 		folderID: folderID,
+		baseURL:  defaultBaseURL,
 		http:     &http.Client{Timeout: 60 * time.Second},
 		limiter:  rate.NewLimiter(10, 1), // 10 запросов/сек
+		now:      time.Now,
 	}
 }
 
@@ -41,7 +51,7 @@ func (c *Client) do(ctx context.Context, method string, payload any) ([]byte, er
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+method, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+method, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -55,87 +65,142 @@ func (c *Client) do(ctx context.Context, method string, payload any) ([]byte, er
 	}
 	defer resp.Body.Close()
 
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, fmt.Errorf("quota exceeded (HTTP 429)")
+		return nil, fmt.Errorf("quota exceeded (HTTP 429): %s", apiMessage(data))
 	}
 	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(data))
+		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, apiMessage(data))
 	}
 
-	return io.ReadAll(resp.Body)
+	return data, nil
 }
 
-// TopRequests возвращает топ запросов и ассоциации по фразе.
-func (c *Client) TopRequests(ctx context.Context, phrase string, numPhrases int) (*TopRequestsResponse, error) {
-	if numPhrases <= 0 || numPhrases > 2000 {
-		numPhrases = 2000
+// post — do + разбор ответа в out.
+func (c *Client) post(ctx context.Context, method string, payload, out any) error {
+	data, err := c.do(ctx, method, payload)
+	if err != nil {
+		return err
 	}
+	if err := json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("unmarshal %s response: %w", method, err)
+	}
+	return nil
+}
+
+// apiMessage достаёт человекочитаемое сообщение из ошибки API
+// ({"code":3,"message":"..."}), иначе отдаёт тело как есть.
+func apiMessage(data []byte) string {
+	var apiErr struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(data, &apiErr); err == nil && apiErr.Message != "" {
+		return apiErr.Message
+	}
+	msg := strings.TrimSpace(string(data))
+	if len(msg) > maxErrBody {
+		msg = msg[:maxErrBody] + "…"
+	}
+	return msg
+}
+
+// TopRequests возвращает топ запросов и ассоциации по фразе (GetTop).
+// numPhrases <= 0 → DefaultNumPhrases (20), > MaxNumPhrases → ошибка.
+func (c *Client) TopRequests(ctx context.Context, phrase string, numPhrases int) (*TopRequestsResponse, error) {
+	if err := validatePhrase(phrase); err != nil {
+		return nil, err
+	}
+	switch {
+	case numPhrases <= 0:
+		numPhrases = DefaultNumPhrases
+	case numPhrases > MaxNumPhrases:
+		return nil, fmt.Errorf("numPhrases must be in 1..%d, got %d", MaxNumPhrases, numPhrases)
+	}
+
 	payload := map[string]any{
 		"phrase":     phrase,
 		"numPhrases": numPhrases,
 		"folderId":   c.folderID,
 	}
-	data, err := c.do(ctx, "topRequests", payload)
-	if err != nil {
-		return nil, err
-	}
+
 	var result TopRequestsResponse
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := c.post(ctx, "topRequests", payload, &result); err != nil {
+		return nil, err
 	}
 	return &result, nil
 }
 
-// Dynamics возвращает динамику частотности.
+// Dynamics возвращает динамику частотности (GetDynamics).
+// period: daily | weekly | monthly (по умолчанию monthly).
+// fromDate/toDate: RFC3339 или YYYY-MM-DD; если не заданы, диапазон
+// досчитывается от текущей даты с выравниванием по границам периода.
 func (c *Client) Dynamics(ctx context.Context, phrase, period, fromDate, toDate string) (*DynamicsResponse, error) {
+	if err := validatePhrase(phrase); err != nil {
+		return nil, err
+	}
+
+	normalizedPeriod, err := normalizePeriod(period)
+	if err != nil {
+		return nil, err
+	}
+
+	from, to, err := resolveDynamicsRange(normalizedPeriod, fromDate, toDate, c.now())
+	if err != nil {
+		return nil, err
+	}
+
 	payload := map[string]any{
 		"phrase":   phrase,
-		"period":   period, // daily | weekly | monthly
+		"period":   normalizedPeriod,
+		"fromDate": from,
+		"toDate":   to,
 		"folderId": c.folderID,
 	}
-	if fromDate != "" { payload["fromDate"] = fromDate }
-	if toDate != ""   { payload["toDate"] = toDate }
 
-	data, err := c.do(ctx, "dynamics", payload)
-	if err != nil {
-		return nil, err
-	}
 	var result DynamicsResponse
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := c.post(ctx, "dynamics", payload, &result); err != nil {
+		return nil, err
 	}
 	return &result, nil
 }
 
-// Regions возвращает распределение по регионам.
+// Regions возвращает распределение по регионам (GetRegionsDistribution).
+// regionMode: all | cities | regions (по умолчанию all).
 func (c *Client) Regions(ctx context.Context, phrase, regionMode string) (*RegionsResponse, error) {
-	payload := map[string]any{
-		"phrase":     phrase,
-		"regionMode": regionMode, // all | cities | regions
-		"folderId":   c.folderID,
+	if err := validatePhrase(phrase); err != nil {
+		return nil, err
 	}
-	data, err := c.do(ctx, "regions", payload)
+
+	region, err := normalizeRegion(regionMode)
 	if err != nil {
 		return nil, err
 	}
+
+	payload := map[string]any{
+		"phrase":   phrase,
+		"region":   region,
+		"folderId": c.folderID,
+	}
+
 	var result RegionsResponse
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := c.post(ctx, "regions", payload, &result); err != nil {
+		return nil, err
 	}
 	return &result, nil
 }
 
-// RegionsTree возвращает справочник регионов.
+// RegionsTree возвращает справочник регионов (GetRegionsTree).
 func (c *Client) RegionsTree(ctx context.Context) (*RegionsTreeResponse, error) {
 	payload := map[string]any{"folderId": c.folderID}
-	data, err := c.do(ctx, "getRegionsTree", payload)
-	if err != nil {
-		return nil, err
-	}
+
 	var result RegionsTreeResponse
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := c.post(ctx, "getRegionsTree", payload, &result); err != nil {
+		return nil, err
 	}
 	return &result, nil
 }
