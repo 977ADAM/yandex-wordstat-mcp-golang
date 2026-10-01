@@ -1,6 +1,7 @@
 .PHONY: build test run docker-build docker-run
 
 BINARY := bin/yandex-wordstat-mcp
+IMAGE := yandex-wordstat-mcp:local
 
 build:
 	@mkdir -p bin
@@ -13,7 +14,7 @@ run:
 	@go run ./cmd/server
 
 docker-build:
-	docker compose build wordstat-mcp
+	docker build -t $(IMAGE) .
 
 docker-run:
 	@docker compose run --rm -T wordstat-mcp
