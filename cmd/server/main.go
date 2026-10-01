@@ -9,7 +9,7 @@ import (
 	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/977ADAM/yandex-wordstat-mcp-golang/internal/mcp"
+	"github.com/977ADAM/yandex-wordstat-mcp-golang/internal/mymcp"
 	"github.com/977ADAM/yandex-wordstat-mcp-golang/internal/wordstat"
 )
 
@@ -27,7 +27,7 @@ func main() {
 		Version: "1.0.0",
 	}, nil)
 
-	mcp.RegisterTools(server, client)
+	mymcp.RegisterTools(server, client)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
