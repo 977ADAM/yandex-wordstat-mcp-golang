@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"yandex-wordstat-mcp-golang/internal/wordstat"
+	"github.com/977ADAM/yandex-wordstat-mcp-golang/internal/wordstat"
 )
 
 func RegisterTools(server *mcp.Server, client *wordstat.Client) {
