@@ -9,8 +9,8 @@ import (
 	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"yandex-wordstat-mcp-golang/internal/mcp"
-	"yandex-wordstat-mcp-golang/internal/wordstat"
+	"github.com/977ADAM/yandex-wordstat-mcp-golang/internal/mcp"
+	"github.com/977ADAM/yandex-wordstat-mcp-golang/internal/wordstat"
 )
 
 func main() {
