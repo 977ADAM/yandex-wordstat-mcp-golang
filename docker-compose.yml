@@ -6,4 +6,6 @@ services:
       WORDSTAT_API_KEY: ${WORDSTAT_API_KEY:?Set WORDSTAT_API_KEY in .env or the environment}
       WORDSTAT_FOLDER_ID: ${WORDSTAT_FOLDER_ID:?Set WORDSTAT_FOLDER_ID in .env or the environment}
     stdin_open: true
+    ports:
+      - "127.0.0.1:8080:8080"
     tty: false
