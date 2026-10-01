@@ -28,9 +28,24 @@ type Client struct {
 	now      func() time.Time
 }
 
+// Option настраивает клиент: используется тестами (подмена API и часов), а
+// также позволяет направить клиент на прокси или тестовый стенд.
+type Option func(*Client)
+
+// WithBaseURL переопределяет базовый URL API.
+func WithBaseURL(baseURL string) Option {
+	return func(c *Client) { c.baseURL = baseURL }
+}
+
+// WithClock переопределяет источник текущего времени — от него зависят
+// дефолтные границы периода в Dynamics.
+func WithClock(now func() time.Time) Option {
+	return func(c *Client) { c.now = now }
+}
+
 // NewClient создаёт клиент. folderID обязателен для каждого запроса.
-func NewClient(apiKey, folderID string) *Client {
-	return &Client{
+func NewClient(apiKey, folderID string, opts ...Option) *Client {
+	c := &Client{
 		apiKey:   apiKey,
 		folderID: folderID,
 		baseURL:  defaultBaseURL,
@@ -38,6 +53,10 @@ func NewClient(apiKey, folderID string) *Client {
 		limiter:  rate.NewLimiter(10, 1), // 10 запросов/сек
 		now:      time.Now,
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // do выполняет POST-запрос к указанному методу Wordstat.
@@ -144,12 +163,12 @@ func (c *Client) Dynamics(ctx context.Context, phrase, period, fromDate, toDate 
 		return nil, err
 	}
 
-	normalizedPeriod, err := normalizePeriod(period)
+	normalizedPeriod, err := NormalizePeriod(period)
 	if err != nil {
 		return nil, err
 	}
 
-	from, to, err := resolveDynamicsRange(normalizedPeriod, fromDate, toDate, c.now())
+	from, to, err := ResolveDynamicsRange(normalizedPeriod, fromDate, toDate, c.now())
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +195,7 @@ func (c *Client) Regions(ctx context.Context, phrase, regionMode string) (*Regio
 		return nil, err
 	}
 
-	region, err := normalizeRegion(regionMode)
+	region, err := NormalizeRegion(regionMode)
 	if err != nil {
 		return nil, err
 	}

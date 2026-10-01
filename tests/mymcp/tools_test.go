@@ -1,4 +1,7 @@
-package mymcp
+// Package mymcp_test — чёрный ящик для слоя инструментов: MCP-сервер с
+// зарегистрированными инструментами поднимается через in-memory транспорт SDK,
+// клиент вызывает инструменты по протоколу, клиент Wordstat подменён заглушкой.
+package mymcp_test
 
 import (
 	"context"
@@ -6,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/977ADAM/yandex-wordstat-mcp-golang/internal/mymcp"
 	"github.com/977ADAM/yandex-wordstat-mcp-golang/internal/wordstat"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -25,6 +29,9 @@ type fakeClient struct {
 	regionResp    *wordstat.RegionsResponse
 	regionTreeRes *wordstat.RegionsTreeResponse
 }
+
+// Проверка на этапе компиляции, что заглушка реализует интерфейс инструментов.
+var _ mymcp.WordstatClient = (*fakeClient)(nil)
 
 func (f *fakeClient) TopRequests(_ context.Context, phrase string, numPhrases int) (*wordstat.TopRequestsResponse, error) {
 	f.topPhrase, f.topNum = phrase, numPhrases
@@ -83,7 +90,7 @@ func connect(t *testing.T, fake *fakeClient) *mcp.ClientSession {
 	ctx := context.Background()
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test-server", Version: "0.0.0"}, nil)
-	RegisterTools(server, fake)
+	mymcp.RegisterTools(server, fake)
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
@@ -169,12 +176,11 @@ func TestRegisteredTools(t *testing.T) {
 
 func TestCallTools(t *testing.T) {
 	tests := []struct {
-		name       string
-		tool       string
-		args       map[string]any
-		wantText   string
-		wantCheck  func(t *testing.T, f *fakeClient)
-		wantErrMsg string
+		name      string
+		tool      string
+		args      map[string]any
+		wantText  string
+		wantCheck func(t *testing.T, f *fakeClient)
 	}{
 		{
 			name: "top_requests прокидывает аргументы",
@@ -239,6 +245,59 @@ func TestCallTools(t *testing.T) {
 				t.Errorf("tool output =\n%q\nwant\n%q", got, tt.wantText)
 			}
 			tt.wantCheck(t, fake)
+		})
+	}
+}
+
+// TestEmptyResults проверяет рендеринг пустых ответов API.
+func TestEmptyResults(t *testing.T) {
+	tests := []struct {
+		name     string
+		tool     string
+		args     map[string]any
+		wantText string
+	}{
+		{
+			name: "top_requests без результатов и ассоциаций",
+			tool: "top_requests",
+			args: map[string]any{"phrase": "узкая ниша"},
+			wantText: "Фраза: узкая ниша\n" +
+				"Всего показов: 0\n\n" +
+				"Популярные запросы:\n" +
+				"(пусто)\n",
+		},
+		{
+			name:     "dynamics без точек",
+			tool:     "dynamics",
+			args:     map[string]any{"phrase": "узкая ниша"},
+			wantText: "Динамика для «узкая ниша»:\n(пусто)\n",
+		},
+		{
+			name:     "regions без регионов",
+			tool:     "regions",
+			args:     map[string]any{"phrase": "узкая ниша"},
+			wantText: "Регионы для «узкая ниша»:\n(пусто)\n",
+		},
+		{
+			name:     "list_regions с пустым деревом",
+			tool:     "list_regions",
+			wantText: "Регионы:\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeClient{
+				topResponse:   &wordstat.TopRequestsResponse{TotalCount: "0"},
+				dynResponse:   &wordstat.DynamicsResponse{},
+				regionResp:    &wordstat.RegionsResponse{},
+				regionTreeRes: &wordstat.RegionsTreeResponse{},
+			}
+			session := connect(t, fake)
+
+			if got := callTool(t, session, tt.tool, tt.args); got != tt.wantText {
+				t.Errorf("tool output =\n%q\nwant\n%q", got, tt.wantText)
+			}
 		})
 	}
 }

@@ -1,10 +1,17 @@
-package wordstat
+// Package wordstat_test — чёрный ящик для чистых хелперов параметров Wordstat:
+// нормализация period/region и расчёт границ периода для dynamics.
+package wordstat_test
 
 import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/977ADAM/yandex-wordstat-mcp-golang/internal/wordstat"
 )
+
+// dateLayout — формат даты для сообщений об ошибках в тестах.
+const dateLayout = "2006-01-02"
 
 func TestNormalizePeriod(t *testing.T) {
 	tests := []struct {
@@ -12,33 +19,33 @@ func TestNormalizePeriod(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{in: "", want: PeriodMonthly},
-		{in: "monthly", want: PeriodMonthly},
-		{in: "MONTHLY", want: PeriodMonthly},
-		{in: " PERIOD_MONTHLY ", want: PeriodMonthly},
-		{in: "daily", want: PeriodDaily},
-		{in: "DAY", want: PeriodDaily},
-		{in: "Period_Daily", want: PeriodDaily},
-		{in: "weekly", want: PeriodWeekly},
-		{in: "week", want: PeriodWeekly},
+		{in: "", want: wordstat.PeriodMonthly},
+		{in: "monthly", want: wordstat.PeriodMonthly},
+		{in: "MONTHLY", want: wordstat.PeriodMonthly},
+		{in: " PERIOD_MONTHLY ", want: wordstat.PeriodMonthly},
+		{in: "daily", want: wordstat.PeriodDaily},
+		{in: "DAY", want: wordstat.PeriodDaily},
+		{in: "Period_Daily", want: wordstat.PeriodDaily},
+		{in: "weekly", want: wordstat.PeriodWeekly},
+		{in: "week", want: wordstat.PeriodWeekly},
 		{in: "yearly", wantErr: true},
 		{in: "PERIOD_UNSPECIFIED", wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.in, func(t *testing.T) {
-			got, err := normalizePeriod(tt.in)
+			got, err := wordstat.NormalizePeriod(tt.in)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("normalizePeriod(%q) = %q, want error", tt.in, got)
+					t.Fatalf("NormalizePeriod(%q) = %q, want error", tt.in, got)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("normalizePeriod(%q) unexpected error: %v", tt.in, err)
+				t.Fatalf("NormalizePeriod(%q) unexpected error: %v", tt.in, err)
 			}
 			if got != tt.want {
-				t.Errorf("normalizePeriod(%q) = %q, want %q", tt.in, got, tt.want)
+				t.Errorf("NormalizePeriod(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
@@ -50,31 +57,31 @@ func TestNormalizeRegion(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{in: "", want: RegionAll},
-		{in: "all", want: RegionAll},
-		{in: "REGION_ALL", want: RegionAll},
-		{in: "cities", want: RegionCities},
-		{in: "City", want: RegionCities},
-		{in: "regions", want: RegionRegions},
-		{in: "REGION_REGIONS", want: RegionRegions},
+		{in: "", want: wordstat.RegionAll},
+		{in: "all", want: wordstat.RegionAll},
+		{in: "REGION_ALL", want: wordstat.RegionAll},
+		{in: "cities", want: wordstat.RegionCities},
+		{in: "City", want: wordstat.RegionCities},
+		{in: "regions", want: wordstat.RegionRegions},
+		{in: "REGION_REGIONS", want: wordstat.RegionRegions},
 		{in: "districts", wantErr: true},
 		{in: "REGION_UNSPECIFIED", wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.in, func(t *testing.T) {
-			got, err := normalizeRegion(tt.in)
+			got, err := wordstat.NormalizeRegion(tt.in)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("normalizeRegion(%q) = %q, want error", tt.in, got)
+					t.Fatalf("NormalizeRegion(%q) = %q, want error", tt.in, got)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("normalizeRegion(%q) unexpected error: %v", tt.in, err)
+				t.Fatalf("NormalizeRegion(%q) unexpected error: %v", tt.in, err)
 			}
 			if got != tt.want {
-				t.Errorf("normalizeRegion(%q) = %q, want %q", tt.in, got, tt.want)
+				t.Errorf("NormalizeRegion(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
@@ -96,18 +103,18 @@ func TestParseDate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.in, func(t *testing.T) {
-			got, err := parseDate(tt.in)
+			got, err := wordstat.ParseDate(tt.in)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("parseDate(%q) = %v, want error", tt.in, got)
+					t.Fatalf("ParseDate(%q) = %v, want error", tt.in, got)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("parseDate(%q) unexpected error: %v", tt.in, err)
+				t.Fatalf("ParseDate(%q) unexpected error: %v", tt.in, err)
 			}
 			if s := got.Format(time.RFC3339); s != tt.want {
-				t.Errorf("parseDate(%q) = %s, want %s", tt.in, s, tt.want)
+				t.Errorf("ParseDate(%q) = %s, want %s", tt.in, s, tt.want)
 			}
 		})
 	}
@@ -128,13 +135,13 @@ func TestResolveDynamicsRange(t *testing.T) {
 	}{
 		{
 			name:     "monthly: дефолт — прошлый завершённый месяц, окно 12 месяцев",
-			period:   PeriodMonthly,
+			period:   wordstat.PeriodMonthly,
 			wantFrom: "2025-10-01T00:00:00Z",
 			wantTo:   "2026-09-30T00:00:00Z",
 		},
 		{
 			name:     "monthly: границы не меняются",
-			period:   PeriodMonthly,
+			period:   wordstat.PeriodMonthly,
 			from:     "2026-01-01T00:00:00Z",
 			to:       "2026-03-31T00:00:00Z",
 			wantFrom: "2026-01-01T00:00:00Z",
@@ -142,66 +149,66 @@ func TestResolveDynamicsRange(t *testing.T) {
 		},
 		{
 			name:     "monthly: только toDate — from считается от него",
-			period:   PeriodMonthly,
+			period:   wordstat.PeriodMonthly,
 			to:       "2026-06-30",
 			wantFrom: "2025-07-01T00:00:00Z",
 			wantTo:   "2026-06-30T00:00:00Z",
 		},
 		{
 			name:    "monthly: fromDate не первое число",
-			period:  PeriodMonthly,
+			period:  wordstat.PeriodMonthly,
 			from:    "2026-01-15",
 			wantErr: "must be the first day of a month",
 		},
 		{
 			name:    "monthly: toDate не последнее число",
-			period:  PeriodMonthly,
+			period:  wordstat.PeriodMonthly,
 			from:    "2026-01-01",
 			to:      "2026-03-15",
 			wantErr: "must be the last day of a month",
 		},
 		{
 			name:     "weekly: дефолт — от понедельника до последнего воскресенья",
-			period:   PeriodWeekly,
+			period:   wordstat.PeriodWeekly,
 			wantFrom: "2026-07-06T00:00:00Z",
 			wantTo:   "2026-09-27T00:00:00Z",
 		},
 		{
 			name:     "weekly: только toDate — from считается от него",
-			period:   PeriodWeekly,
+			period:   wordstat.PeriodWeekly,
 			to:       "2026-06-28",
 			wantFrom: "2026-04-06T00:00:00Z",
 			wantTo:   "2026-06-28T00:00:00Z",
 		},
 		{
 			name:    "weekly: fromDate не понедельник",
-			period:  PeriodWeekly,
+			period:  wordstat.PeriodWeekly,
 			from:    "2026-03-03",
 			wantErr: "must be a Monday",
 		},
 		{
 			name:    "weekly: toDate не воскресенье",
-			period:  PeriodWeekly,
+			period:  wordstat.PeriodWeekly,
 			from:    "2026-03-02",
 			to:      "2026-04-04",
 			wantErr: "must be a Sunday",
 		},
 		{
 			name:     "daily: дефолт — последние 60 дней",
-			period:   PeriodDaily,
+			period:   wordstat.PeriodDaily,
 			wantFrom: "2026-08-02T00:00:00Z",
 			wantTo:   "2026-09-30T00:00:00Z",
 		},
 		{
 			name:     "daily: только toDate",
-			period:   PeriodDaily,
+			period:   wordstat.PeriodDaily,
 			to:       "2026-05-10",
 			wantFrom: "2026-03-12T00:00:00Z",
 			wantTo:   "2026-05-10T00:00:00Z",
 		},
 		{
 			name:    "fromDate позже toDate",
-			period:  PeriodDaily,
+			period:  wordstat.PeriodDaily,
 			from:    "2026-05-10",
 			to:      "2026-05-01",
 			wantErr: "is after toDate",
@@ -213,7 +220,7 @@ func TestResolveDynamicsRange(t *testing.T) {
 		},
 		{
 			name:    "битая дата",
-			period:  PeriodMonthly,
+			period:  wordstat.PeriodMonthly,
 			from:    "вчера",
 			wantErr: "invalid date",
 		},
@@ -221,7 +228,7 @@ func TestResolveDynamicsRange(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			from, to, err := resolveDynamicsRange(tt.period, tt.from, tt.to, now)
+			from, to, err := wordstat.ResolveDynamicsRange(tt.period, tt.from, tt.to, now)
 
 			if tt.wantErr != "" {
 				if err == nil {
@@ -251,7 +258,7 @@ func TestResolveDynamicsRangeWeeklyFromIsMonday(t *testing.T) {
 	for day := 0; day < 366; day++ {
 		now := time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC).AddDate(0, 0, day)
 
-		from, to, err := resolveDynamicsRange(PeriodWeekly, "", "", now)
+		from, to, err := wordstat.ResolveDynamicsRange(wordstat.PeriodWeekly, "", "", now)
 		if err != nil {
 			t.Fatalf("now=%s: unexpected error: %v", now.Format(dateLayout), err)
 		}

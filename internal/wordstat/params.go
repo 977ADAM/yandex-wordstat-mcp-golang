@@ -36,10 +36,10 @@ func validatePhrase(phrase string) error {
 	return nil
 }
 
-// normalizePeriod приводит пользовательское значение к enum API.
+// NormalizePeriod приводит пользовательское значение к enum API.
 // Принимает daily/weekly/monthly в любом регистре, а также готовые PERIOD_*.
 // Пустое значение → PERIOD_MONTHLY (самый полезный дефолт для сезонности).
-func normalizePeriod(period string) (string, error) {
+func NormalizePeriod(period string) (string, error) {
 	switch strings.ToUpper(strings.TrimSpace(period)) {
 	case "", "MONTH", "MONTHLY", PeriodMonthly:
 		return PeriodMonthly, nil
@@ -51,10 +51,10 @@ func normalizePeriod(period string) (string, error) {
 	return "", fmt.Errorf("invalid period %q: allowed daily, weekly, monthly", period)
 }
 
-// normalizeRegion приводит пользовательское значение к enum API.
+// NormalizeRegion приводит пользовательское значение к enum API.
 // Принимает all/cities/regions в любом регистре, а также готовые REGION_*.
 // Пустое значение → REGION_ALL.
-func normalizeRegion(region string) (string, error) {
+func NormalizeRegion(region string) (string, error) {
 	switch strings.ToUpper(strings.TrimSpace(region)) {
 	case "", "ALL", RegionAll:
 		return RegionAll, nil
@@ -66,9 +66,9 @@ func normalizeRegion(region string) (string, error) {
 	return "", fmt.Errorf("invalid regionMode %q: allowed all, cities, regions", region)
 }
 
-// parseDate принимает RFC3339 (2026-01-01T00:00:00Z) или YYYY-MM-DD и
+// ParseDate принимает RFC3339 (2026-01-01T00:00:00Z) или YYYY-MM-DD и
 // возвращает начало суток в UTC.
-func parseDate(value string) (time.Time, error) {
+func ParseDate(value string) (time.Time, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return time.Time{}, errors.New("empty date")
@@ -82,7 +82,7 @@ func parseDate(value string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("invalid date %q: expected RFC3339 (2026-01-01T00:00:00Z) or YYYY-MM-DD", value)
 }
 
-// resolveDynamicsRange возвращает fromDate/toDate в RFC3339 для метода dynamics.
+// ResolveDynamicsRange возвращает fromDate/toDate в RFC3339 для метода dynamics.
 //
 // API требует fromDate и накладывает ограничения на границы периода:
 //   - monthly: fromDate — первый день месяца, toDate — последний день месяца;
@@ -91,7 +91,7 @@ func parseDate(value string) (time.Time, error) {
 //
 // Незаданные границы досчитываются от now: 12 месяцев / 12 недель / 60 дней,
 // заканчиваясь последним завершённым периодом.
-func resolveDynamicsRange(period, fromDate, toDate string, now time.Time) (string, string, error) {
+func ResolveDynamicsRange(period, fromDate, toDate string, now time.Time) (string, string, error) {
 	var (
 		from, to       time.Time
 		hasFrom, hasTo bool
@@ -99,13 +99,13 @@ func resolveDynamicsRange(period, fromDate, toDate string, now time.Time) (strin
 	)
 
 	if strings.TrimSpace(fromDate) != "" {
-		if from, err = parseDate(fromDate); err != nil {
+		if from, err = ParseDate(fromDate); err != nil {
 			return "", "", err
 		}
 		hasFrom = true
 	}
 	if strings.TrimSpace(toDate) != "" {
-		if to, err = parseDate(toDate); err != nil {
+		if to, err = ParseDate(toDate); err != nil {
 			return "", "", err
 		}
 		hasTo = true
