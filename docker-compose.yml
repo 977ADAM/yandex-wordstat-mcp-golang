@@ -1,0 +1,8 @@
+services:
+  wordstat-mcp:
+    build: .
+    environment:
+      WORDSTAT_API_KEY: ${WORDSTAT_API_KEY:?Set WORDSTAT_API_KEY in .env or the environment}
+      WORDSTAT_FOLDER_ID: ${WORDSTAT_FOLDER_ID:?Set WORDSTAT_FOLDER_ID in .env or the environment}
+    stdin_open: true
+    tty: false
