@@ -1,5 +1,6 @@
 services:
   wordstat-mcp:
+    image: yandex-wordstat-mcp:local
     build: .
     environment:
       WORDSTAT_API_KEY: ${WORDSTAT_API_KEY:?Set WORDSTAT_API_KEY in .env or the environment}
