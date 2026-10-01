@@ -17,4 +17,4 @@ docker-build:
 	docker build -t $(IMAGE) .
 
 docker-run:
-	@docker compose run --rm -T wordstat-mcp
+	@docker compose up
