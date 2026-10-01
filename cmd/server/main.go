@@ -1,4 +1,3 @@
-// yandex-wordstat-mcp-golang/cmd/server/main.go
 package main
 
 import (
@@ -8,12 +7,17 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/977ADAM/yandex-wordstat-mcp-golang/internal/mymcp"
 	"github.com/977ADAM/yandex-wordstat-mcp-golang/internal/wordstat"
+	"github.com/joho/godotenv"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Printf("no .env file loaded: %v", err)
+	}
+
 	apiKey := os.Getenv("WORDSTAT_API_KEY")
 	folderID := os.Getenv("WORDSTAT_FOLDER_ID")
 	if apiKey == "" || folderID == "" {
@@ -36,5 +40,3 @@ func main() {
 		log.Fatalf("server error: %v", err)
 	}
 }
-
-
