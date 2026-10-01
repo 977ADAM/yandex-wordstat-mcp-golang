@@ -1,4 +1,4 @@
-module yandex-wordstat-mcp-golang
+module github.com/977ADAM/yandex-wordstat-mcp-golang
 
 go 1.27.0
 
