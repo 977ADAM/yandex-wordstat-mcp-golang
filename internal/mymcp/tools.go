@@ -28,15 +28,17 @@ func RegisterTools(server *mcp.Server, client WordstatClient) {
 	// ─── top_requests ──────────────────────────────────────
 	type TopArgs struct {
 		Phrase     string   `json:"phrase" jsonschema:"Поисковая фраза (например, 'купить кофемашину')"`
-		NumPhrases int      `json:"numPhrases,omitempty" jsonschema:"Сколько фраз вернуть в requests (1..2000), по умолчанию 20. На число associations не влияет"`
+		NumPhrases int      `json:"numPhrases,omitempty" jsonschema:"Сколько фраз вернуть в requests (1..2000), по умолчанию 20; на associations не влияет — они приходят своим числом"`
 		Regions    []string `json:"regions,omitempty" jsonschema:"Geo ID Яндекса (до 100): '213' — Москва, '1' — Москва и область, '225' — Россия. Пусто — вся Россия"`
 		Devices    []string `json:"devices,omitempty" jsonschema:"Устройства (до 3): all, desktop, phone, tablet. Пусто — все устройства"`
 	}
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "top_requests",
 		Description: "Популярные и связанные запросы по фразе за последние 30 дней. " +
-			"requests — подмножества totalCount (суммировать их нельзя), associations — нет. " +
-			"hasData=false означает, что спроса нет; это валидный ответ, а не ошибка.",
+			"requests — подмножества totalCount, суммировать их count нельзя (сумма превышает totalCount в разы); " +
+			"associations — отдельные запросы, они не подмножества и их число не ограничено numPhrases. " +
+			"hasData=false означает, что спроса нет: это валидный ответ, а не ошибка. " +
+			"Ответы кэшируются в процессе: cacheHit=true — данные из кэша (TTL 24 часа).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args TopArgs) (*mcp.CallToolResult, TopRequestsOutput, error) {
 		res, err := client.TopRequests(ctx, wordstat.TopParams{
 			Phrase:     args.Phrase,
@@ -65,8 +67,10 @@ func RegisterTools(server *mcp.Server, client WordstatClient) {
 		Devices  []string `json:"devices,omitempty" jsonschema:"Устройства (до 3): all, desktop, phone, tablet. Пусто — все устройства"`
 	}
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "dynamics",
-		Description: "Динамика частотности запроса во времени (день/неделя/месяц) с фактическим окном в ответе.",
+		Name: "dynamics",
+		Description: "Динамика частотности запроса во времени (день/неделя/месяц). " +
+			"Фактическое окно возвращается в period/fromDate/toDate — границы по умолчанию считаются " +
+			"по последнему завершённому периоду. Метрика та же, что в top_requests, отличается окно.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args DynArgs) (*mcp.CallToolResult, DynamicsOutput, error) {
 		res, err := client.Dynamics(ctx, wordstat.DynamicsParams{
 			Phrase:   args.Phrase,
@@ -95,9 +99,9 @@ func RegisterTools(server *mcp.Server, client WordstatClient) {
 	}
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "regions",
-		Description: "Распределение спроса по регионам за последние 30 дней (с индексом интереса), " +
-			"отсортировано по убыванию count. includeNames=true добавляет названия регионов " +
-			"(отдельный вызов справочника, дальше из кэша).",
+		Description: "Распределение спроса по регионам за последние 30 дней, отсортировано по убыванию count. " +
+			"affinityIndex — интерес региона относительно страны: больше 100 — выше среднего. " +
+			"includeNames=true добавляет названия регионов (один запрос справочника, дальше из кэша).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args RegArgs) (*mcp.CallToolResult, RegionsOutput, error) {
 		res, err := client.Regions(ctx, args.Phrase, args.RegionMode)
 		if err != nil {
@@ -122,8 +126,9 @@ func RegisterTools(server *mcp.Server, client WordstatClient) {
 
 	// ─── list_regions ──────────────────────────────────────
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "list_regions",
-		Description: "Справочник регионов (id → название) плоским списком с уровнем вложенности.",
+		Name: "list_regions",
+		Description: "Справочник регионов (id → название) плоским списком с уровнем вложенности. " +
+			"Кэшируется, поэтому обычно нужен только для разового маппинга: в regions есть includeNames.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, RegionsTreeOutput, error) {
 		res, err := client.RegionsTree(ctx)
 		if err != nil {
