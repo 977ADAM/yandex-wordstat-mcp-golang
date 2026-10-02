@@ -89,23 +89,35 @@ func RegisterTools(server *mcp.Server, client WordstatClient) {
 
 	// ─── regions ───────────────────────────────────────────
 	type RegArgs struct {
-		Phrase     string `json:"phrase" jsonschema:"Поисковая фраза"`
-		RegionMode string `json:"regionMode,omitempty" jsonschema:"Группировка: all, cities, regions (по умолчанию all)"`
+		Phrase       string `json:"phrase" jsonschema:"Поисковая фраза"`
+		RegionMode   string `json:"regionMode,omitempty" jsonschema:"Группировка: all, cities, regions (по умолчанию all)"`
+		IncludeNames bool   `json:"includeNames,omitempty" jsonschema:"Добавить названия регионов (join со справочником list_regions, он кэшируется)"`
 	}
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "regions",
-		Description: "Распределение спроса по регионам за последние 30 дней (с индексом интереса). Названия регионов — в list_regions.",
+		Name: "regions",
+		Description: "Распределение спроса по регионам за последние 30 дней (с индексом интереса), " +
+			"отсортировано по убыванию count. includeNames=true добавляет названия регионов " +
+			"(отдельный вызов справочника, дальше из кэша).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args RegArgs) (*mcp.CallToolResult, RegionsOutput, error) {
 		res, err := client.Regions(ctx, args.Phrase, args.RegionMode)
 		if err != nil {
 			return errorCall(err), failedRegions(err), nil
 		}
 
-		out, err := regionsOutput(args.Phrase, res)
+		var names map[string]string
+		if args.IncludeNames {
+			tree, err := client.RegionsTree(ctx)
+			if err != nil {
+				return errorCall(err), failedRegions(err), nil
+			}
+			names = regionNames(tree)
+		}
+
+		out, err := regionsOutput(args.Phrase, res, names)
 		if err != nil {
 			return errorCall(err), failedRegions(err), nil
 		}
-		return textResult(formatRegions(args.Phrase, res)), out, nil
+		return textResult(formatRegions(args.Phrase, res, names)), out, nil
 	})
 
 	// ─── list_regions ──────────────────────────────────────

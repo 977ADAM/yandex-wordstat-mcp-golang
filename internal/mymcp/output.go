@@ -92,7 +92,8 @@ type RegionsOutput struct {
 
 // RegionCount — статистика по одному региону.
 type RegionCount struct {
-	RegionID      string  `json:"regionId" jsonschema:"ID региона (название — в list_regions)"`
+	RegionID      string  `json:"regionId" jsonschema:"ID региона"`
+	Name          string  `json:"name,omitempty" jsonschema:"название региона; заполняется при includeNames = true"`
 	Count         int64   `json:"count" jsonschema:"число запросов в регионе за 30 дней"`
 	Share         float64 `json:"share" jsonschema:"доля запроса от всех запросов к Яндексу в регионе"`
 	AffinityIndex float64 `json:"affinityIndex" jsonschema:"индекс интереса: доля в регионе к доле по стране"`
@@ -252,7 +253,8 @@ func dynamicsOutput(phrase string, res *wordstat.DynamicsResponse) (DynamicsOutp
 }
 
 // regionsOutput конвертирует ответ API в структурированный результат.
-func regionsOutput(phrase string, res *wordstat.RegionsResponse) (RegionsOutput, error) {
+// names — справочник id → название (может быть nil, тогда имена не заполняются).
+func regionsOutput(phrase string, res *wordstat.RegionsResponse, names map[string]string) (RegionsOutput, error) {
 	regions := make([]RegionCount, 0, len(res.Results))
 	for _, r := range res.Results {
 		count, err := parseCount("results.count", r.Count)
@@ -261,6 +263,7 @@ func regionsOutput(phrase string, res *wordstat.RegionsResponse) (RegionsOutput,
 		}
 		regions = append(regions, RegionCount{
 			RegionID:      r.RegionID,
+			Name:          names[r.RegionID],
 			Count:         count,
 			Share:         r.Share,
 			AffinityIndex: r.AffinityIndex,
@@ -268,6 +271,22 @@ func regionsOutput(phrase string, res *wordstat.RegionsResponse) (RegionsOutput,
 	}
 
 	return RegionsOutput{Phrase: phrase, Region: res.Region, Regions: regions, CacheHit: res.CacheHit}, nil
+}
+
+// regionNames строит справочник id → название по дереву регионов.
+func regionNames(tree *wordstat.RegionsTreeResponse) map[string]string {
+	names := make(map[string]string)
+
+	var walk func(nodes []wordstat.RegionNode)
+	walk = func(nodes []wordstat.RegionNode) {
+		for _, n := range nodes {
+			names[n.ID] = n.Name
+			walk(n.Children)
+		}
+	}
+	walk(tree.Regions)
+
+	return names
 }
 
 // regionsTreeOutput разворачивает дерево регионов в плоский список.

@@ -59,15 +59,21 @@ func formatScope(regions, devices []string) string {
 	return "Фильтр — " + strings.Join(parts, "; ") + "\n"
 }
 
-// formatRegions рендерит распределение по регионам.
-func formatRegions(phrase string, res *wordstat.RegionsResponse) string {
+// formatRegions рендерит распределение по регионам. names — справочник
+// id → название (может быть nil).
+func formatRegions(phrase string, res *wordstat.RegionsResponse, names map[string]string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Регионы для «%s»:\n", phrase)
 	if len(res.Results) == 0 {
 		b.WriteString("(пусто)\n")
 	}
 	for _, r := range res.Results {
-		fmt.Fprintf(&b, "regionId=%s count=%s share=%g affinity=%g\n", r.RegionID, r.Count, r.Share, r.AffinityIndex)
+		name := ""
+		if n := names[r.RegionID]; n != "" {
+			name = " (" + n + ")"
+		}
+		fmt.Fprintf(&b, "regionId=%s%s count=%s share=%g affinity=%g\n",
+			r.RegionID, name, r.Count, r.Share, r.AffinityIndex)
 	}
 	return b.String()
 }

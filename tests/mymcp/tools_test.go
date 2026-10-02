@@ -28,6 +28,7 @@ type fakeClient struct {
 	regionMode    string
 	treeCalls     int
 	err           error
+	treeErr       error
 	topResponse   *wordstat.TopRequestsResponse
 	dynResponse   *wordstat.DynamicsResponse
 	regionResp    *wordstat.RegionsResponse
@@ -93,6 +94,9 @@ func (f *fakeClient) RegionsTree(_ context.Context) (*wordstat.RegionsTreeRespon
 	f.treeCalls++
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.treeErr != nil {
+		return nil, f.treeErr
 	}
 	return f.regionTreeRes, nil
 }
@@ -414,6 +418,25 @@ func TestCallTools(t *testing.T) {
 			},
 		},
 		{
+			name: "regions: includeNames добавляет названия из справочника",
+			tool: "regions",
+			args: map[string]any{"phrase": "яндекс", "regionMode": "cities", "includeNames": true},
+			wantText: "Регионы для «яндекс»:\n" +
+				"regionId=213 (Москва) count=235 share=1.09e-05 affinity=120.4\n",
+			wantStruct: mymcp.RegionsOutput{
+				Phrase: "яндекс",
+				Region: wordstat.RegionCities,
+				Regions: []mymcp.RegionCount{
+					{RegionID: "213", Name: "Москва", Count: 235, Share: 0.0000109, AffinityIndex: 120.4},
+				},
+			},
+			wantCheck: func(t *testing.T, f *fakeClient) {
+				if f.treeCalls != 1 {
+					t.Errorf("RegionsTree calls = %d, want 1 (справочник нужен для имён)", f.treeCalls)
+				}
+			},
+		},
+		{
 			name:     "list_regions: дерево в структуре",
 			tool:     "list_regions",
 			args:     nil,
@@ -701,5 +724,37 @@ func TestCacheHitInOutput(t *testing.T) {
 	regionsOut := structuredInto[mymcp.RegionsOutput](t, "regions", regions)
 	if !regionsOut.CacheHit {
 		t.Error("regions: cacheHit = false, want true")
+	}
+}
+
+// TestRegionsWithoutNamesSkipsTree проверяет, что справочник регионов (31 КБ)
+// запрашивается только при includeNames = true.
+func TestRegionsWithoutNamesSkipsTree(t *testing.T) {
+	fake := newTestFakeClient()
+	session := connect(t, fake)
+
+	callTool(t, session, "regions", map[string]any{"phrase": "яндекс"})
+
+	if fake.treeCalls != 0 {
+		t.Errorf("RegionsTree calls = %d, want 0 без includeNames", fake.treeCalls)
+	}
+}
+
+// TestRegionsNamesErrorPropagates проверяет, что сбой справочника не приводит
+// к тихой выдаче без имён: потребитель получает ошибку.
+func TestRegionsNamesErrorPropagates(t *testing.T) {
+	fake := newTestFakeClient()
+	fake.treeErr = wordstat.ErrQuotaExceeded // сами регионы отвечают, падает только справочник
+
+	session := connect(t, fake)
+
+	res := callTool(t, session, "regions", map[string]any{"phrase": "яндекс", "includeNames": true})
+	if !res.IsError {
+		t.Fatalf("expected isError = true, got %#v", res.Content)
+	}
+
+	out := structuredInto[mymcp.RegionsOutput](t, "regions", res)
+	if out.Code != mymcp.CodeQuotaExceeded {
+		t.Errorf("code = %q, want %q", out.Code, mymcp.CodeQuotaExceeded)
 	}
 }
