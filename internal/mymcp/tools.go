@@ -17,6 +17,10 @@ type WordstatClient interface {
 }
 
 // RegisterTools регистрирует четыре инструмента Wordstat на MCP-сервере.
+//
+// Каждый инструмент возвращает и текст (для человека и клиентов без поддержки
+// structured content), и типизированный результат: SDK выводит из него
+// outputSchema и заполняет structuredContent.
 func RegisterTools(server *mcp.Server, client WordstatClient) {
 
 	// ─── top_requests ──────────────────────────────────────
@@ -27,12 +31,16 @@ func RegisterTools(server *mcp.Server, client WordstatClient) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "top_requests",
 		Description: "Популярные и связанные запросы по фразе за последние 30 дней с частотностью.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args TopArgs) (*mcp.CallToolResult, any, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args TopArgs) (*mcp.CallToolResult, TopRequestsOutput, error) {
 		res, err := client.TopRequests(ctx, args.Phrase, args.NumPhrases)
 		if err != nil {
-			return nil, nil, err
+			return nil, TopRequestsOutput{}, err
 		}
-		return textResult(formatTopRequests(args.Phrase, res)), nil, nil
+		out, err := topRequestsOutput(args.Phrase, res)
+		if err != nil {
+			return nil, TopRequestsOutput{}, err
+		}
+		return textResult(formatTopRequests(args.Phrase, res)), out, nil
 	})
 
 	// ─── dynamics ──────────────────────────────────────────
@@ -45,12 +53,16 @@ func RegisterTools(server *mcp.Server, client WordstatClient) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "dynamics",
 		Description: "Динамика частотности запроса во времени (день/неделя/месяц).",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args DynArgs) (*mcp.CallToolResult, any, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args DynArgs) (*mcp.CallToolResult, DynamicsOutput, error) {
 		res, err := client.Dynamics(ctx, args.Phrase, args.Period, args.FromDate, args.ToDate)
 		if err != nil {
-			return nil, nil, err
+			return nil, DynamicsOutput{}, err
 		}
-		return textResult(formatDynamics(args.Phrase, res)), nil, nil
+		out, err := dynamicsOutput(args.Phrase, res)
+		if err != nil {
+			return nil, DynamicsOutput{}, err
+		}
+		return textResult(formatDynamics(args.Phrase, res)), out, nil
 	})
 
 	// ─── regions ───────────────────────────────────────────
@@ -61,24 +73,28 @@ func RegisterTools(server *mcp.Server, client WordstatClient) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "regions",
 		Description: "Распределение спроса по регионам за последние 30 дней (с индексом интереса).",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args RegArgs) (*mcp.CallToolResult, any, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args RegArgs) (*mcp.CallToolResult, RegionsOutput, error) {
 		res, err := client.Regions(ctx, args.Phrase, args.RegionMode)
 		if err != nil {
-			return nil, nil, err
+			return nil, RegionsOutput{}, err
 		}
-		return textResult(formatRegions(args.Phrase, res)), nil, nil
+		out, err := regionsOutput(args.Phrase, res)
+		if err != nil {
+			return nil, RegionsOutput{}, err
+		}
+		return textResult(formatRegions(args.Phrase, res)), out, nil
 	})
 
 	// ─── list_regions ──────────────────────────────────────
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_regions",
 		Description: "Справочник регионов (id → название).",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, RegionsTreeOutput, error) {
 		res, err := client.RegionsTree(ctx)
 		if err != nil {
-			return nil, nil, err
+			return nil, RegionsTreeOutput{}, err
 		}
-		return textResult(formatRegionTree(res)), nil, nil
+		return textResult(formatRegionTree(res)), regionsTreeOutput(res), nil
 	})
 }
 

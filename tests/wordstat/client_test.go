@@ -62,29 +62,42 @@ func newTestClient(t *testing.T, fixture string, status int, calls *[]recordedRe
 }
 
 func TestClientMethods(t *testing.T) {
-	topRequestsWant := &wordstat.TopRequestsResponse{
-		TotalCount: "21500",
-		Results: []wordstat.PhraseStat{
-			{Phrase: "чат боты для бизнеса", Count: "1100"},
-			{Phrase: "чат бот для бизнеса макс", Count: "145"},
-		},
-		Associations: []wordstat.PhraseStat{
-			{Phrase: "чатбот", Count: "7371"},
-			{Phrase: "чатбот нейросеть", Count: "372"},
-		},
+	// Эхо фактически отправленных параметров (NumPhrases/Period/Region) заполняет
+	// клиент, поэтому ожидания строятся функциями.
+	topRequestsWant := func(numPhrases int) *wordstat.TopRequestsResponse {
+		return &wordstat.TopRequestsResponse{
+			NumPhrases: numPhrases,
+			TotalCount: "21500",
+			Results: []wordstat.PhraseStat{
+				{Phrase: "чат боты для бизнеса", Count: "1100"},
+				{Phrase: "чат бот для бизнеса макс", Count: "145"},
+			},
+			Associations: []wordstat.PhraseStat{
+				{Phrase: "чатбот", Count: "7371"},
+				{Phrase: "чатбот нейросеть", Count: "372"},
+			},
+		}
 	}
-	dynamicsWant := &wordstat.DynamicsResponse{
-		Results: []wordstat.DynamicsPoint{
-			{Date: "2026-01-31T00:00:00Z", Count: "1050", Share: 8.7e-06},
-			{Date: "2026-02-28T00:00:00Z", Count: "1180", Share: 9.4e-06},
-			{Date: "2026-03-31T00:00:00Z", Count: "1100", Share: 9.1e-06},
-		},
+	dynamicsWant := func(period, from, to string) *wordstat.DynamicsResponse {
+		return &wordstat.DynamicsResponse{
+			Period:   period,
+			FromDate: from,
+			ToDate:   to,
+			Results: []wordstat.DynamicsPoint{
+				{Date: "2026-01-31T00:00:00Z", Count: "1050", Share: 8.7e-06},
+				{Date: "2026-02-28T00:00:00Z", Count: "1180", Share: 9.4e-06},
+				{Date: "2026-03-31T00:00:00Z", Count: "1100", Share: 9.1e-06},
+			},
+		}
 	}
-	regionsWant := &wordstat.RegionsResponse{
-		Results: []wordstat.RegionStat{
-			{RegionID: "213", Count: "235", Share: 0.0000109, AffinityIndex: 120.4},
-			{RegionID: "2", Count: "2330855", Share: 0.5818950367758946, AffinityIndex: 123.75386731541778},
-		},
+	regionsWant := func(region string) *wordstat.RegionsResponse {
+		return &wordstat.RegionsResponse{
+			Region: region,
+			Results: []wordstat.RegionStat{
+				{RegionID: "213", Count: "235", Share: 0.0000109, AffinityIndex: 120.4},
+				{RegionID: "2", Count: "2330855", Share: 0.5818950367758946, AffinityIndex: 123.75386731541778},
+			},
+		}
 	}
 
 	tests := []struct {
@@ -110,7 +123,7 @@ func TestClientMethods(t *testing.T) {
 				"numPhrases": float64(wordstat.DefaultNumPhrases),
 				"folderId":   "test-folder",
 			},
-			want: topRequestsWant,
+			want: topRequestsWant(wordstat.DefaultNumPhrases),
 		},
 		{
 			name:    "topRequests: явный numPhrases",
@@ -124,7 +137,7 @@ func TestClientMethods(t *testing.T) {
 				"numPhrases": float64(100),
 				"folderId":   "test-folder",
 			},
-			want: topRequestsWant,
+			want: topRequestsWant(100),
 		},
 		{
 			name:    "topRequests: numPhrases выше границы proto",
@@ -158,7 +171,7 @@ func TestClientMethods(t *testing.T) {
 				"toDate":   "2026-03-31T00:00:00Z",
 				"folderId": "test-folder",
 			},
-			want: dynamicsWant,
+			want: dynamicsWant(wordstat.PeriodMonthly, "2026-01-01T00:00:00Z", "2026-03-31T00:00:00Z"),
 		},
 		{
 			name:    "dynamics: period по умолчанию и диапазон 12 месяцев",
@@ -174,7 +187,7 @@ func TestClientMethods(t *testing.T) {
 				"toDate":   "2026-09-30T00:00:00Z",
 				"folderId": "test-folder",
 			},
-			want: dynamicsWant,
+			want: dynamicsWant(wordstat.PeriodMonthly, "2025-10-01T00:00:00Z", "2026-09-30T00:00:00Z"),
 		},
 		{
 			name:    "dynamics: weekly с понедельника по воскресенье",
@@ -190,7 +203,7 @@ func TestClientMethods(t *testing.T) {
 				"toDate":   "2026-04-05T00:00:00Z",
 				"folderId": "test-folder",
 			},
-			want: dynamicsWant,
+			want: dynamicsWant(wordstat.PeriodWeekly, "2026-03-02T00:00:00Z", "2026-04-05T00:00:00Z"),
 		},
 		{
 			name:    "dynamics: weekly по умолчанию (12 недель)",
@@ -206,7 +219,7 @@ func TestClientMethods(t *testing.T) {
 				"toDate":   "2026-09-27T00:00:00Z",
 				"folderId": "test-folder",
 			},
-			want: dynamicsWant,
+			want: dynamicsWant(wordstat.PeriodWeekly, "2026-07-06T00:00:00Z", "2026-09-27T00:00:00Z"),
 		},
 		{
 			name:    "dynamics: daily по умолчанию (60 дней)",
@@ -222,7 +235,7 @@ func TestClientMethods(t *testing.T) {
 				"toDate":   "2026-09-30T00:00:00Z",
 				"folderId": "test-folder",
 			},
-			want: dynamicsWant,
+			want: dynamicsWant(wordstat.PeriodDaily, "2026-08-02T00:00:00Z", "2026-09-30T00:00:00Z"),
 		},
 		{
 			name:    "dynamics: неизвестный period",
@@ -254,7 +267,7 @@ func TestClientMethods(t *testing.T) {
 				"region":   wordstat.RegionCities,
 				"folderId": "test-folder",
 			},
-			want: regionsWant,
+			want: regionsWant(wordstat.RegionCities),
 		},
 		{
 			name:    "regions: пустой regionMode → REGION_ALL",
@@ -268,7 +281,7 @@ func TestClientMethods(t *testing.T) {
 				"region":   wordstat.RegionAll,
 				"folderId": "test-folder",
 			},
-			want: regionsWant,
+			want: regionsWant(wordstat.RegionAll),
 		},
 		{
 			name:    "regions: неизвестный regionMode",

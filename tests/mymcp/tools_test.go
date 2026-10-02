@@ -5,7 +5,9 @@ package mymcp_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -15,6 +17,8 @@ import (
 )
 
 // fakeClient записывает переданные аргументы и отдаёт заранее заданные ответы.
+// Поля-эхо (NumPhrases/Period/Region) заполняются так же, как это делает
+// настоящий клиент.
 type fakeClient struct {
 	topPhrase     string
 	topNum        int
@@ -38,7 +42,9 @@ func (f *fakeClient) TopRequests(_ context.Context, phrase string, numPhrases in
 	if f.err != nil {
 		return nil, f.err
 	}
-	return f.topResponse, nil
+	res := *f.topResponse
+	res.NumPhrases = numPhrases
+	return &res, nil
 }
 
 func (f *fakeClient) Dynamics(_ context.Context, phrase, period, fromDate, toDate string) (*wordstat.DynamicsResponse, error) {
@@ -73,9 +79,13 @@ func newTestFakeClient() *fakeClient {
 			Associations: []wordstat.PhraseStat{{Phrase: "чатбот нейросеть", Count: "372"}},
 		},
 		dynResponse: &wordstat.DynamicsResponse{
-			Results: []wordstat.DynamicsPoint{{Date: "2026-01-31T00:00:00Z", Count: "1050", Share: 8.7e-06}},
+			Period:   wordstat.PeriodDaily,
+			FromDate: "2026-01-01T00:00:00Z",
+			ToDate:   "2026-01-31T00:00:00Z",
+			Results:  []wordstat.DynamicsPoint{{Date: "2026-01-31T00:00:00Z", Count: "1050", Share: 8.7e-06}},
 		},
 		regionResp: &wordstat.RegionsResponse{
+			Region:  wordstat.RegionCities,
 			Results: []wordstat.RegionStat{{RegionID: "213", Count: "235", Share: 0.0000109, AffinityIndex: 120.4}},
 		},
 		regionTreeRes: &wordstat.RegionsTreeResponse{
@@ -107,12 +117,18 @@ func connect(t *testing.T, fake *fakeClient) *mcp.ClientSession {
 	return session
 }
 
-func callTool(t *testing.T, session *mcp.ClientSession, name string, args map[string]any) string {
+func callTool(t *testing.T, session *mcp.ClientSession, name string, args map[string]any) *mcp.CallToolResult {
 	t.Helper()
 	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
 		t.Fatalf("call %s: %v", name, err)
 	}
+	return res
+}
+
+// textOf достаёт текст из успешного результата вызова.
+func textOf(t *testing.T, name string, res *mcp.CallToolResult) string {
+	t.Helper()
 	if res.IsError {
 		t.Fatalf("call %s returned error result: %v", name, res.Content)
 	}
@@ -124,6 +140,43 @@ func callTool(t *testing.T, session *mcp.ClientSession, name string, args map[st
 		t.Fatalf("call %s: content is %T, want *mcp.TextContent", name, res.Content[0])
 	}
 	return text.Text
+}
+
+// structuredJSON достаёт structuredContent в виде JSON.
+func structuredJSON(t *testing.T, name string, res *mcp.CallToolResult) string {
+	t.Helper()
+	if res.StructuredContent == nil {
+		t.Fatalf("call %s: structuredContent is empty", name)
+	}
+	raw, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatalf("call %s: marshal structuredContent: %v", name, err)
+	}
+	return string(raw)
+}
+
+// assertStructured сравнивает structuredContent с ожидаемой структурой.
+// Сравнение семантическое (через any): после round-trip порядок ключей теряется.
+func assertStructured(t *testing.T, name string, res *mcp.CallToolResult, want any) {
+	t.Helper()
+	gotJSON := structuredJSON(t, name, res)
+
+	wantRaw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal want: %v", err)
+	}
+
+	var got, wantAny any
+	if err := json.Unmarshal([]byte(gotJSON), &got); err != nil {
+		t.Fatalf("unmarshal structuredContent: %v", err)
+	}
+	if err := json.Unmarshal(wantRaw, &wantAny); err != nil {
+		t.Fatalf("unmarshal want: %v", err)
+	}
+
+	if !reflect.DeepEqual(got, wantAny) {
+		t.Errorf("structuredContent =\n%s\nwant\n%s", gotJSON, wantRaw)
+	}
 }
 
 func TestRegisteredTools(t *testing.T) {
@@ -145,6 +198,9 @@ func TestRegisteredTools(t *testing.T) {
 		if tool.Description == "" {
 			t.Errorf("tool %s has empty description", tool.Name)
 		}
+		if tool.OutputSchema == nil {
+			t.Errorf("tool %s has no outputSchema", tool.Name)
+		}
 	}
 	for _, name := range wantNames {
 		if byName[name] == nil {
@@ -157,7 +213,7 @@ func TestRegisteredTools(t *testing.T) {
 	for name, tool := range byName {
 		schema, ok := tool.InputSchema.(map[string]any)
 		if !ok {
-			t.Fatalf("tool %s: unexpected schema type %T", name, tool.InputSchema)
+			t.Fatalf("tool %s: unexpected input schema type %T", name, tool.InputSchema)
 		}
 		props, _ := schema["properties"].(map[string]any)
 		for prop, raw := range props {
@@ -172,24 +228,45 @@ func TestRegisteredTools(t *testing.T) {
 			}
 		}
 	}
+
+	// Схема вывода top_requests: обязательные поля структурированного результата.
+	outputSchema, ok := byName["top_requests"].OutputSchema.(map[string]any)
+	if !ok {
+		t.Fatalf("top_requests: unexpected output schema type %T", byName["top_requests"].OutputSchema)
+	}
+	outProps, _ := outputSchema["properties"].(map[string]any)
+	for _, field := range []string{"phrase", "totalCount", "requests"} {
+		if _, ok := outProps[field]; !ok {
+			t.Errorf("top_requests outputSchema has no %q property", field)
+		}
+	}
 }
 
 func TestCallTools(t *testing.T) {
 	tests := []struct {
-		name      string
-		tool      string
-		args      map[string]any
-		wantText  string
-		wantCheck func(t *testing.T, f *fakeClient)
+		name       string
+		tool       string
+		args       map[string]any
+		wantText   string
+		wantStruct any
+		wantCheck  func(t *testing.T, f *fakeClient)
 	}{
 		{
-			name: "top_requests прокидывает аргументы",
+			name: "top_requests: текст и структура",
 			tool: "top_requests",
 			args: map[string]any{"phrase": "чат бот для бизнеса", "numPhrases": 5},
 			wantText: "Фраза: чат бот для бизнеса\n" +
 				"Всего показов: 21500\n\n" +
 				"Популярные запросы:\n- чатбот: 7371\n\n" +
 				"Похожие запросы:\n- чатбот нейросеть: 372\n",
+			wantStruct: mymcp.TopRequestsOutput{
+				Phrase:     "чат бот для бизнеса",
+				TotalCount: 21500,
+				Requests:   []mymcp.PhraseCount{{Phrase: "чатбот", Count: 7371}},
+				Associations: []mymcp.PhraseCount{
+					{Phrase: "чатбот нейросеть", Count: 372},
+				},
+			},
 			wantCheck: func(t *testing.T, f *fakeClient) {
 				if f.topPhrase != "чат бот для бизнеса" || f.topNum != 5 {
 					t.Errorf("got phrase=%q numPhrases=%d", f.topPhrase, f.topNum)
@@ -197,7 +274,7 @@ func TestCallTools(t *testing.T) {
 			},
 		},
 		{
-			name: "dynamics прокидывает период и даты",
+			name: "dynamics: фактическое окно попадает в структуру",
 			tool: "dynamics",
 			args: map[string]any{
 				"phrase":   "яндекс",
@@ -206,6 +283,13 @@ func TestCallTools(t *testing.T) {
 				"toDate":   "2026-01-31",
 			},
 			wantText: "Динамика для «яндекс»:\n2026-01-31T00:00:00Z: count=1050 share=8.7e-06\n",
+			wantStruct: mymcp.DynamicsOutput{
+				Phrase:   "яндекс",
+				Period:   wordstat.PeriodDaily,
+				FromDate: "2026-01-01T00:00:00Z",
+				ToDate:   "2026-01-31T00:00:00Z",
+				Points:   []mymcp.DynamicsPoint{{Date: "2026-01-31T00:00:00Z", Count: 1050, Share: 8.7e-06}},
+			},
 			wantCheck: func(t *testing.T, f *fakeClient) {
 				if f.dynPeriod != "daily" || f.dynFrom != "2026-01-01" || f.dynTo != "2026-01-31" {
 					t.Errorf("got period=%q from=%q to=%q", f.dynPeriod, f.dynFrom, f.dynTo)
@@ -213,10 +297,17 @@ func TestCallTools(t *testing.T) {
 			},
 		},
 		{
-			name:     "regions прокидывает regionMode",
+			name:     "regions: фактическая группировка попадает в структуру",
 			tool:     "regions",
 			args:     map[string]any{"phrase": "яндекс", "regionMode": "cities"},
 			wantText: "Регионы для «яндекс»:\nregionId=213 count=235 share=1.09e-05 affinity=120.4\n",
+			wantStruct: mymcp.RegionsOutput{
+				Phrase: "яндекс",
+				Region: wordstat.RegionCities,
+				Regions: []mymcp.RegionCount{
+					{RegionID: "213", Count: 235, Share: 0.0000109, AffinityIndex: 120.4},
+				},
+			},
 			wantCheck: func(t *testing.T, f *fakeClient) {
 				if f.regionMode != "cities" {
 					t.Errorf("got regionMode=%q", f.regionMode)
@@ -224,10 +315,17 @@ func TestCallTools(t *testing.T) {
 			},
 		},
 		{
-			name:     "list_regions без аргументов",
+			name:     "list_regions: дерево в структуре",
 			tool:     "list_regions",
 			args:     nil,
 			wantText: "Регионы:\nРоссия (id=225)\n  Москва (id=213)\n",
+			wantStruct: mymcp.RegionsTreeOutput{
+				Count: 2,
+				Regions: []mymcp.RegionEntry{
+					{ID: "225", Name: "Россия", Depth: 0},
+					{ID: "213", Name: "Москва", Depth: 1, ParentID: "225"},
+				},
+			},
 			wantCheck: func(t *testing.T, f *fakeClient) {
 				if f.treeCalls != 1 {
 					t.Errorf("RegionsTree calls = %d, want 1", f.treeCalls)
@@ -241,64 +339,101 @@ func TestCallTools(t *testing.T) {
 			fake := newTestFakeClient()
 			session := connect(t, fake)
 
-			if got := callTool(t, session, tt.tool, tt.args); got != tt.wantText {
-				t.Errorf("tool output =\n%q\nwant\n%q", got, tt.wantText)
+			res := callTool(t, session, tt.tool, tt.args)
+
+			if got := textOf(t, tt.tool, res); got != tt.wantText {
+				t.Errorf("tool text =\n%q\nwant\n%q", got, tt.wantText)
 			}
+			assertStructured(t, tt.tool, res, tt.wantStruct)
 			tt.wantCheck(t, fake)
 		})
 	}
 }
 
-// TestEmptyResults проверяет рендеринг пустых ответов API.
+// TestEmptyResults проверяет пустые ответы API: нулевые значения proto3 JSON
+// опускает, поэтому totalCount приходит пустой строкой и должен стать нулём.
 func TestEmptyResults(t *testing.T) {
 	tests := []struct {
-		name     string
-		tool     string
-		args     map[string]any
-		wantText string
+		name       string
+		tool       string
+		args       map[string]any
+		wantText   string
+		wantStruct any
 	}{
 		{
 			name: "top_requests без результатов и ассоциаций",
 			tool: "top_requests",
 			args: map[string]any{"phrase": "узкая ниша"},
 			wantText: "Фраза: узкая ниша\n" +
-				"Всего показов: 0\n\n" +
+				"Всего показов: \n\n" +
 				"Популярные запросы:\n" +
 				"(пусто)\n",
+			wantStruct: mymcp.TopRequestsOutput{
+				Phrase:     "узкая ниша",
+				TotalCount: 0,
+				Requests:   []mymcp.PhraseCount{},
+			},
 		},
 		{
-			name:     "dynamics без точек",
-			tool:     "dynamics",
-			args:     map[string]any{"phrase": "узкая ниша"},
-			wantText: "Динамика для «узкая ниша»:\n(пусто)\n",
+			name:       "dynamics без точек",
+			tool:       "dynamics",
+			args:       map[string]any{"phrase": "узкая ниша"},
+			wantText:   "Динамика для «узкая ниша»:\n(пусто)\n",
+			wantStruct: mymcp.DynamicsOutput{Phrase: "узкая ниша", Points: []mymcp.DynamicsPoint{}},
 		},
 		{
-			name:     "regions без регионов",
-			tool:     "regions",
-			args:     map[string]any{"phrase": "узкая ниша"},
-			wantText: "Регионы для «узкая ниша»:\n(пусто)\n",
+			name:       "regions без регионов",
+			tool:       "regions",
+			args:       map[string]any{"phrase": "узкая ниша"},
+			wantText:   "Регионы для «узкая ниша»:\n(пусто)\n",
+			wantStruct: mymcp.RegionsOutput{Phrase: "узкая ниша", Regions: []mymcp.RegionCount{}},
 		},
 		{
-			name:     "list_regions с пустым деревом",
-			tool:     "list_regions",
-			wantText: "Регионы:\n",
+			name:       "list_regions с пустым деревом",
+			tool:       "list_regions",
+			wantText:   "Регионы:\n",
+			wantStruct: mymcp.RegionsTreeOutput{Regions: []mymcp.RegionEntry{}},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeClient{
-				topResponse:   &wordstat.TopRequestsResponse{TotalCount: "0"},
+				topResponse:   &wordstat.TopRequestsResponse{},
 				dynResponse:   &wordstat.DynamicsResponse{},
 				regionResp:    &wordstat.RegionsResponse{},
 				regionTreeRes: &wordstat.RegionsTreeResponse{},
 			}
 			session := connect(t, fake)
 
-			if got := callTool(t, session, tt.tool, tt.args); got != tt.wantText {
-				t.Errorf("tool output =\n%q\nwant\n%q", got, tt.wantText)
+			res := callTool(t, session, tt.tool, tt.args)
+
+			if got := textOf(t, tt.tool, res); got != tt.wantText {
+				t.Errorf("tool text =\n%q\nwant\n%q", got, tt.wantText)
 			}
+			assertStructured(t, tt.tool, res, tt.wantStruct)
 		})
+	}
+}
+
+// TestUnexpectedCountIsError проверяет, что нечисловой count из API не
+// превращается в тихую ложь, а приводит к ошибке инструмента.
+func TestUnexpectedCountIsError(t *testing.T) {
+	fake := newTestFakeClient()
+	fake.topResponse = &wordstat.TopRequestsResponse{TotalCount: "много"}
+
+	session := connect(t, fake)
+
+	res := callTool(t, session, "top_requests", map[string]any{"phrase": "яндекс"})
+	if !res.IsError {
+		t.Fatalf("expected error result, got %#v", res.Content)
+	}
+	text, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("content is %T, want *mcp.TextContent", res.Content[0])
+	}
+	if !strings.Contains(text.Text, `"много"`) {
+		t.Errorf("error text %q does not mention the raw value", text.Text)
 	}
 }
 
@@ -308,13 +443,7 @@ func TestCallToolPropagatesClientError(t *testing.T) {
 
 	session := connect(t, fake)
 
-	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
-		Name:      "top_requests",
-		Arguments: map[string]any{"phrase": " "},
-	})
-	if err != nil {
-		t.Fatalf("unexpected protocol error: %v", err)
-	}
+	res := callTool(t, session, "top_requests", map[string]any{"phrase": " "})
 	if !res.IsError {
 		t.Fatalf("expected error result, got %#v", res.Content)
 	}

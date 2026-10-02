@@ -9,6 +9,11 @@ package wordstat
 
 // TopRequestsResponse — ответ метода POST /v2/wordstat/topRequests (GetTop).
 type TopRequestsResponse struct {
+	// NumPhrases — фактически запрошенное число фраз (заполняет клиент,
+	// в ответе API такого поля нет). Нужно, чтобы вызывающий код знал
+	// разрешённое значение по умолчанию.
+	NumPhrases int `json:"-"`
+
 	// TotalCount — общее число запросов, содержащих все ключевые слова (int64 → строка).
 	TotalCount string `json:"totalCount"`
 	// Results — популярные запросы.
@@ -25,6 +30,12 @@ type PhraseStat struct {
 
 // DynamicsResponse — ответ метода POST /v2/wordstat/dynamics (GetDynamics).
 type DynamicsResponse struct {
+	// Period, FromDate, ToDate — фактически отправленные параметры запроса
+	// (заполняет клиент, включая разрешённые по умолчанию значения).
+	Period   string `json:"-"`
+	FromDate string `json:"-"`
+	ToDate   string `json:"-"`
+
 	// Results — точки временного ряда.
 	Results []DynamicsPoint `json:"results"`
 }
@@ -38,6 +49,10 @@ type DynamicsPoint struct {
 
 // RegionsResponse — ответ метода POST /v2/wordstat/regions (GetRegionsDistribution).
 type RegionsResponse struct {
+	// Region — фактически отправленная группировка (REGION_ALL, REGION_CITIES
+	// или REGION_REGIONS); заполняет клиент.
+	Region string `json:"-"`
+
 	// Results — распределение по регионам.
 	Results []RegionStat `json:"results"`
 }

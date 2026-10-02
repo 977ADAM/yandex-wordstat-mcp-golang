@@ -151,6 +151,7 @@ func (c *Client) TopRequests(ctx context.Context, phrase string, numPhrases int)
 	if err := c.post(ctx, "topRequests", payload, &result); err != nil {
 		return nil, err
 	}
+	result.NumPhrases = numPhrases
 	return &result, nil
 }
 
@@ -185,6 +186,7 @@ func (c *Client) Dynamics(ctx context.Context, phrase, period, fromDate, toDate 
 	if err := c.post(ctx, "dynamics", payload, &result); err != nil {
 		return nil, err
 	}
+	result.Period, result.FromDate, result.ToDate = normalizedPeriod, from, to
 	return &result, nil
 }
 
@@ -210,6 +212,7 @@ func (c *Client) Regions(ctx context.Context, phrase, regionMode string) (*Regio
 	if err := c.post(ctx, "regions", payload, &result); err != nil {
 		return nil, err
 	}
+	result.Region = region
 	return &result, nil
 }
 
