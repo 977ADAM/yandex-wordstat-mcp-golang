@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -255,7 +257,27 @@ func (c *Client) Regions(ctx context.Context, phrase, regionMode string) (*Regio
 		return nil, err
 	}
 	result.Region = region
+	sortRegionsByCount(result.Results)
 	return &result, nil
+}
+
+// sortRegionsByCount сортирует регионы по убыванию частотности: API отдаёт их
+// в произвольном порядке (например, 15816, 496, 19685, 4, 5514).
+func sortRegionsByCount(regions []RegionStat) {
+	sort.SliceStable(regions, func(i, j int) bool {
+		return countValue(regions[i].Count) > countValue(regions[j].Count)
+	})
+}
+
+// countValue разбирает count (protobuf int64 строкой) для сравнения.
+// Нечисловое значение считается нулём: строгость проверки — на уровне
+// структурированного вывода (см. mymcp.parseCount).
+func countValue(raw string) int64 {
+	n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // RegionsTree возвращает справочник регионов (GetRegionsTree).

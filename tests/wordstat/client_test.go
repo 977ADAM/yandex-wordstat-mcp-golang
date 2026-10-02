@@ -105,12 +105,14 @@ func TestClientMethods(t *testing.T) {
 			},
 		}
 	}
+	// Регионы приходят от API в произвольном порядке, клиент сортирует их по
+	// убыванию count.
 	regionsWant := func(region string) *wordstat.RegionsResponse {
 		return &wordstat.RegionsResponse{
 			Region: region,
 			Results: []wordstat.RegionStat{
-				{RegionID: "213", Count: "235", Share: 0.0000109, AffinityIndex: 120.4},
 				{RegionID: "2", Count: "2330855", Share: 0.5818950367758946, AffinityIndex: 123.75386731541778},
+				{RegionID: "213", Count: "235", Share: 0.0000109, AffinityIndex: 120.4},
 			},
 		}
 	}
@@ -640,5 +642,34 @@ func TestValidationErrorsAreInvalidArgument(t *testing.T) {
 				t.Fatalf("errors.Is(err, ErrInvalidArgument) = false, err = %v", err)
 			}
 		})
+	}
+}
+
+// TestRegionsSortedByCount проверяет сортировку регионов по убыванию count:
+// API отдаёт их в произвольном порядке, а потребителю нужен ранжированный список.
+func TestRegionsSortedByCount(t *testing.T) {
+	var calls []recordedRequest
+	c := newTestClient(t, "regions_unsorted.json", http.StatusOK, &calls)
+
+	res, err := c.Regions(context.Background(), "зимняя резина", "regions")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := make([]string, 0, len(res.Results))
+	for _, r := range res.Results {
+		got = append(got, r.RegionID)
+	}
+
+	// 19685, 15816, 5514, 496, 4, затем регион с пустым count (нулевые значения
+	// proto3 JSON опускает).
+	want := []string{"213", "1", "192", "2", "225", "1000"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("regions order = %v, want %v", got, want)
+		}
 	}
 }

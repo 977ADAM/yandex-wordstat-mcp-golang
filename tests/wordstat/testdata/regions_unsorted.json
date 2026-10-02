@@ -1,0 +1,10 @@
+{
+  "results": [
+    {"region": "1", "count": "15816", "share": 0.1, "affinityIndex": 172.0},
+    {"region": "2", "count": "496", "share": 0.01, "affinityIndex": 80.0},
+    {"region": "213", "count": "19685", "share": 0.2, "affinityIndex": 150.0},
+    {"region": "225", "count": "4", "share": 0.001, "affinityIndex": 10.0},
+    {"region": "192", "count": "5514", "share": 0.05, "affinityIndex": 90.0},
+    {"region": "1000", "count": "", "share": 0, "affinityIndex": 0}
+  ]
+}
