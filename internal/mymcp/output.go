@@ -50,6 +50,7 @@ type TopRequestsOutput struct {
 	Associations []PhraseCount `json:"associations" jsonschema:"похожие запросы; не подмножества totalCount"`
 	Regions      []string      `json:"regions" jsonschema:"фактический фильтр по geo ID (пусто — вся Россия)"`
 	Devices      []string      `json:"devices" jsonschema:"фактический фильтр по устройствам (пусто — все устройства)"`
+	CacheHit     bool          `json:"cacheHit" jsonschema:"true — ответ взят из кэша процесса, а не запрошен у API заново"`
 }
 
 // PhraseCount — фраза и её частотность.
@@ -69,6 +70,7 @@ type DynamicsOutput struct {
 	Points   []DynamicsPoint `json:"points" jsonschema:"точки временного ряда"`
 	Regions  []string        `json:"regions" jsonschema:"фактический фильтр по geo ID (пусто — вся Россия)"`
 	Devices  []string        `json:"devices" jsonschema:"фактический фильтр по устройствам (пусто — все устройства)"`
+	CacheHit bool            `json:"cacheHit" jsonschema:"true — ответ взят из кэша процесса, а не запрошен у API заново"`
 }
 
 // DynamicsPoint — одна точка временного ряда.
@@ -82,9 +84,10 @@ type DynamicsPoint struct {
 type RegionsOutput struct {
 	ToolStatus
 
-	Phrase  string        `json:"phrase" jsonschema:"поисковая фраза"`
-	Region  string        `json:"region" jsonschema:"фактическая группировка: REGION_ALL, REGION_CITIES или REGION_REGIONS"`
-	Regions []RegionCount `json:"regions" jsonschema:"распределение по регионам за 30 дней"`
+	Phrase   string        `json:"phrase" jsonschema:"поисковая фраза"`
+	Region   string        `json:"region" jsonschema:"фактическая группировка: REGION_ALL, REGION_CITIES или REGION_REGIONS"`
+	Regions  []RegionCount `json:"regions" jsonschema:"распределение по регионам за 30 дней, по убыванию count"`
+	CacheHit bool          `json:"cacheHit" jsonschema:"true — ответ взят из кэша процесса, а не запрошен у API заново"`
 }
 
 // RegionCount — статистика по одному региону.
@@ -104,8 +107,9 @@ type RegionCount struct {
 type RegionsTreeOutput struct {
 	ToolStatus
 
-	Count   int           `json:"count" jsonschema:"сколько всего регионов в справочнике"`
-	Regions []RegionEntry `json:"regions" jsonschema:"регионы в порядке обхода дерева"`
+	Count    int           `json:"count" jsonschema:"сколько всего регионов в справочнике"`
+	Regions  []RegionEntry `json:"regions" jsonschema:"регионы в порядке обхода дерева"`
+	CacheHit bool          `json:"cacheHit" jsonschema:"true — ответ взят из кэша процесса, а не запрошен у API заново"`
 }
 
 // RegionEntry — один регион в плоском списке.
@@ -207,6 +211,7 @@ func topRequestsOutput(phrase string, res *wordstat.TopRequestsResponse) (TopReq
 		Associations: associations,
 		Regions:      nonNilStrings(res.Regions),
 		Devices:      nonNilStrings(res.Devices),
+		CacheHit:     res.CacheHit,
 	}, nil
 }
 
@@ -242,6 +247,7 @@ func dynamicsOutput(phrase string, res *wordstat.DynamicsResponse) (DynamicsOutp
 		Points:   points,
 		Regions:  nonNilStrings(res.Regions),
 		Devices:  nonNilStrings(res.Devices),
+		CacheHit: res.CacheHit,
 	}, nil
 }
 
@@ -261,7 +267,7 @@ func regionsOutput(phrase string, res *wordstat.RegionsResponse) (RegionsOutput,
 		})
 	}
 
-	return RegionsOutput{Phrase: phrase, Region: res.Region, Regions: regions}, nil
+	return RegionsOutput{Phrase: phrase, Region: res.Region, Regions: regions, CacheHit: res.CacheHit}, nil
 }
 
 // regionsTreeOutput разворачивает дерево регионов в плоский список.
@@ -277,7 +283,7 @@ func regionsTreeOutput(res *wordstat.RegionsTreeResponse) RegionsTreeOutput {
 	}
 	walk(res.Regions, 0, "")
 
-	return RegionsTreeOutput{Count: len(regions), Regions: regions}
+	return RegionsTreeOutput{Count: len(regions), Regions: regions, CacheHit: res.CacheHit}
 }
 
 // nonNilStrings возвращает пустой слайс вместо nil, чтобы в JSON был [], а не null.

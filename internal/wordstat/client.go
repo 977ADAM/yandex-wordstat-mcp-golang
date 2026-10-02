@@ -28,6 +28,7 @@ type Client struct {
 	http     *http.Client
 	limiter  *rate.Limiter
 	now      func() time.Time
+	cache    *cache
 }
 
 // Option настраивает клиент: используется тестами (подмена API и часов), а
@@ -40,9 +41,15 @@ func WithBaseURL(baseURL string) Option {
 }
 
 // WithClock переопределяет источник текущего времени — от него зависят
-// дефолтные границы периода в Dynamics.
+// дефолтные границы периода в Dynamics и истечение кэша.
 func WithClock(now func() time.Time) Option {
 	return func(c *Client) { c.now = now }
+}
+
+// WithCacheTTL задаёт время жизни записей кэша (по умолчанию DefaultCacheTTL).
+// Значение <= 0 отключает кэширование.
+func WithCacheTTL(ttl time.Duration) Option {
+	return func(c *Client) { c.cache = newCache(ttl) }
 }
 
 // NewClient создаёт клиент. folderID обязателен для каждого запроса.
@@ -54,6 +61,7 @@ func NewClient(apiKey, folderID string, opts ...Option) *Client {
 		http:     &http.Client{Timeout: 60 * time.Second},
 		limiter:  rate.NewLimiter(10, 1), // 10 запросов/сек
 		now:      time.Now,
+		cache:    newCache(DefaultCacheTTL),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -174,12 +182,18 @@ func (c *Client) TopRequests(ctx context.Context, params TopParams) (*TopRequest
 		payload["devices"] = devices
 	}
 
+	key := cacheKey("topRequests", payload)
+	if cached, ok := c.cached(key); ok {
+		return cached.(*TopRequestsResponse), nil
+	}
+
 	var result TopRequestsResponse
 	if err := c.post(ctx, "topRequests", payload, &result); err != nil {
 		return nil, err
 	}
 	result.NumPhrases = numPhrases
 	result.Regions, result.Devices = regions, devices
+	c.store(key, &result)
 	return &result, nil
 }
 
@@ -225,12 +239,18 @@ func (c *Client) Dynamics(ctx context.Context, params DynamicsParams) (*Dynamics
 		payload["devices"] = devices
 	}
 
+	key := cacheKey("dynamics", payload)
+	if cached, ok := c.cached(key); ok {
+		return cached.(*DynamicsResponse), nil
+	}
+
 	var result DynamicsResponse
 	if err := c.post(ctx, "dynamics", payload, &result); err != nil {
 		return nil, err
 	}
 	result.Period, result.FromDate, result.ToDate = normalizedPeriod, from, to
 	result.Regions, result.Devices = regions, devices
+	c.store(key, &result)
 	return &result, nil
 }
 
@@ -252,12 +272,18 @@ func (c *Client) Regions(ctx context.Context, phrase, regionMode string) (*Regio
 		"folderId": c.folderID,
 	}
 
+	key := cacheKey("regions", payload)
+	if cached, ok := c.cached(key); ok {
+		return cached.(*RegionsResponse), nil
+	}
+
 	var result RegionsResponse
 	if err := c.post(ctx, "regions", payload, &result); err != nil {
 		return nil, err
 	}
 	result.Region = region
 	sortRegionsByCount(result.Results)
+	c.store(key, &result)
 	return &result, nil
 }
 
@@ -284,9 +310,15 @@ func countValue(raw string) int64 {
 func (c *Client) RegionsTree(ctx context.Context) (*RegionsTreeResponse, error) {
 	payload := map[string]any{"folderId": c.folderID}
 
+	key := cacheKey("getRegionsTree", payload)
+	if cached, ok := c.cached(key); ok {
+		return cached.(*RegionsTreeResponse), nil
+	}
+
 	var result RegionsTreeResponse
 	if err := c.post(ctx, "getRegionsTree", payload, &result); err != nil {
 		return nil, err
 	}
+	c.store(key, &result)
 	return &result, nil
 }

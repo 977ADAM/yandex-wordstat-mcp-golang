@@ -16,6 +16,8 @@ type TopRequestsResponse struct {
 	// Regions и Devices — фактически отправленный фильтр (пусто — без фильтра).
 	Regions []string `json:"-"`
 	Devices []string `json:"-"`
+	// CacheHit — ответ взят из кэша процесса (заполняет клиент).
+	CacheHit bool `json:"-"`
 
 	// TotalCount — общее число запросов, содержащих все ключевые слова (int64 → строка).
 	TotalCount string `json:"totalCount"`
@@ -41,6 +43,8 @@ type DynamicsResponse struct {
 	// Regions и Devices — фактически отправленный фильтр (пусто — без фильтра).
 	Regions []string `json:"-"`
 	Devices []string `json:"-"`
+	// CacheHit — ответ взят из кэша процесса (заполняет клиент).
+	CacheHit bool `json:"-"`
 
 	// Results — точки временного ряда.
 	Results []DynamicsPoint `json:"results"`
@@ -59,6 +63,9 @@ type RegionsResponse struct {
 	// или REGION_REGIONS); заполняет клиент.
 	Region string `json:"-"`
 
+	// CacheHit — ответ взят из кэша процесса (заполняет клиент).
+	CacheHit bool `json:"-"`
+
 	// Results — распределение по регионам.
 	Results []RegionStat `json:"results"`
 }
@@ -73,6 +80,9 @@ type RegionStat struct {
 
 // RegionsTreeResponse — ответ метода POST /v2/wordstat/getRegionsTree (GetRegionsTree).
 type RegionsTreeResponse struct {
+	// CacheHit — ответ взят из кэша процесса (заполняет клиент).
+	CacheHit bool `json:"-"`
+
 	Regions []RegionNode `json:"regions"`
 }
 

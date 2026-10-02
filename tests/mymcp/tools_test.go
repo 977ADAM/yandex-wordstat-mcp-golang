@@ -290,7 +290,7 @@ func TestRegisteredTools(t *testing.T) {
 		t.Fatalf("top_requests: unexpected output schema type %T", byName["top_requests"].OutputSchema)
 	}
 	outProps, _ := outputSchema["properties"].(map[string]any)
-	for _, field := range []string{"phrase", "hasData", "totalCount", "requests", "regions", "devices", "code", "message", "retryable"} {
+	for _, field := range []string{"phrase", "hasData", "totalCount", "requests", "regions", "devices", "cacheHit", "code", "message", "retryable"} {
 		if _, ok := outProps[field]; !ok {
 			t.Errorf("top_requests outputSchema has no %q property", field)
 		}
@@ -676,5 +676,30 @@ func TestUnexpectedCountIsError(t *testing.T) {
 	out := structuredInto[mymcp.TopRequestsOutput](t, "top_requests", res)
 	if out.Code != mymcp.CodeInternal {
 		t.Errorf("code = %q, want %q", out.Code, mymcp.CodeInternal)
+	}
+}
+
+// TestCacheHitInOutput проверяет, что попадание в кэш клиента видно потребителю:
+// structuredContent.cacheHit = true, при этом текст и данные не меняются.
+func TestCacheHitInOutput(t *testing.T) {
+	fake := newTestFakeClient()
+	fake.topResponse.CacheHit = true
+	fake.regionResp.CacheHit = true
+
+	session := connect(t, fake)
+
+	top := callTool(t, session, "top_requests", map[string]any{"phrase": "зимняя резина"})
+	topOut := structuredInto[mymcp.TopRequestsOutput](t, "top_requests", top)
+	if !topOut.CacheHit {
+		t.Error("top_requests: cacheHit = false, want true")
+	}
+	if topOut.TotalCount != 21500 {
+		t.Errorf("top_requests: totalCount = %d, want 21500", topOut.TotalCount)
+	}
+
+	regions := callTool(t, session, "regions", map[string]any{"phrase": "зимняя резина"})
+	regionsOut := structuredInto[mymcp.RegionsOutput](t, "regions", regions)
+	if !regionsOut.CacheHit {
+		t.Error("regions: cacheHit = false, want true")
 	}
 }
