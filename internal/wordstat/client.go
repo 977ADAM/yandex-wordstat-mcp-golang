@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +21,17 @@ const defaultBaseURL = "https://searchapi.api.cloud.yandex.net/v2/wordstat/"
 // maxErrBody ограничивает размер тела ошибки API в сообщении.
 const maxErrBody = 512
 
+const (
+	// DefaultMaxAttempts — сколько всего попыток делает клиент для временно
+	// неуспешного запроса (1 попытка + 2 повтора).
+	DefaultMaxAttempts = 3
+	// DefaultRetryBackoff — базовая пауза перед повтором, если API не прислал
+	// Retry-After. Дальше пауза удваивается.
+	DefaultRetryBackoff = 500 * time.Millisecond
+	// maxRetryDelay ограничивает паузу, чтобы большой Retry-After не подвесил вызов.
+	maxRetryDelay = 30 * time.Second
+)
+
 // Client — клиент Wordstat API (Search API v2).
 type Client struct {
 	apiKey   string
@@ -29,6 +41,9 @@ type Client struct {
 	limiter  *rate.Limiter
 	now      func() time.Time
 	cache    *cache
+
+	maxAttempts  int
+	retryBackoff time.Duration
 }
 
 // Option настраивает клиент: используется тестами (подмена API и часов), а
@@ -52,6 +67,18 @@ func WithCacheTTL(ttl time.Duration) Option {
 	return func(c *Client) { c.cache = newCache(ttl) }
 }
 
+// WithRetries задаёт общее число попыток для временно неуспешных запросов
+// (429 и 5xx). Значение <= 1 отключает повторы.
+func WithRetries(attempts int) Option {
+	return func(c *Client) { c.maxAttempts = attempts }
+}
+
+// WithRetryBackoff задаёт базовую паузу перед повтором, когда API не прислал
+// Retry-After (по умолчанию DefaultRetryBackoff).
+func WithRetryBackoff(backoff time.Duration) Option {
+	return func(c *Client) { c.retryBackoff = backoff }
+}
+
 // NewClient создаёт клиент. folderID обязателен для каждого запроса.
 func NewClient(apiKey, folderID string, opts ...Option) *Client {
 	c := &Client{
@@ -62,6 +89,9 @@ func NewClient(apiKey, folderID string, opts ...Option) *Client {
 		limiter:  rate.NewLimiter(10, 1), // 10 запросов/сек
 		now:      time.Now,
 		cache:    newCache(DefaultCacheTTL),
+
+		maxAttempts:  DefaultMaxAttempts,
+		retryBackoff: DefaultRetryBackoff,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -75,18 +105,44 @@ func NewClient(apiKey, folderID string, opts ...Option) *Client {
 // ErrUnavailable, ErrInternal), чтобы вызывающий код мог отличить сбой от
 // «данных нет» и понять, стоит ли повторять запрос.
 func (c *Client) do(ctx context.Context, method string, payload any) ([]byte, error) {
-	if err := c.limiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("%w: rate limit: %v", ErrUnavailable, err)
-	}
-
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("%w: marshal: %v", ErrInternal, err)
 	}
 
+	attempts := c.maxAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	for attempt := 1; ; attempt++ {
+		data, retryAfter, err := c.attempt(ctx, method, body)
+		if err == nil {
+			return data, nil
+		}
+
+		// Повторяем только временные сбои (429 и 5xx/сеть): невалидный запрос
+		// или внутренняя ошибка от повтора не изменятся.
+		if attempt >= attempts || !isRetryable(err) {
+			return nil, err
+		}
+
+		if err := sleepCtx(ctx, c.retryDelay(attempt, retryAfter)); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// attempt выполняет одну попытку запроса. Возвращает Retry-After, если API его
+// прислал, — чтобы вызывающий выбрал паузу.
+func (c *Client) attempt(ctx context.Context, method string, body []byte) (data []byte, retryAfter time.Duration, err error) {
+	if err := c.limiter.Wait(ctx); err != nil {
+		return nil, 0, fmt.Errorf("%w: rate limit: %v", ErrUnavailable, err)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+method, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("%w: create request: %v", ErrInternal, err)
+		return nil, 0, fmt.Errorf("%w: create request: %v", ErrInternal, err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -94,14 +150,16 @@ func (c *Client) do(ctx context.Context, method string, payload any) ([]byte, er
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: http request: %v", ErrUnavailable, err)
+		return nil, 0, fmt.Errorf("%w: http request: %v", ErrUnavailable, err)
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
+	data, err = io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("%w: read response: %v", ErrUnavailable, err)
+		return nil, 0, fmt.Errorf("%w: read response: %v", ErrUnavailable, err)
 	}
+
+	retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), c.now())
 
 	code, message, hasEnvelope := apiErrorEnvelope(data)
 
@@ -109,16 +167,81 @@ func (c *Client) do(ctx context.Context, method string, payload any) ([]byte, er
 		if !hasEnvelope {
 			message = apiMessage(data)
 		}
-		return nil, apiFailure(resp.StatusCode, code, message)
+		return nil, retryAfter, apiFailure(resp.StatusCode, code, message)
 	}
 
 	// API иногда отдаёт ошибку с HTTP 200. Без этой проверки потребитель
 	// увидел бы «спроса нет» вместо сбоя.
 	if hasEnvelope {
-		return nil, apiFailure(resp.StatusCode, code, message)
+		return nil, retryAfter, apiFailure(resp.StatusCode, code, message)
 	}
 
-	return data, nil
+	return data, 0, nil
+}
+
+// isRetryable сообщает, имеет ли смысл повторять запрос: те же ошибки помечены
+// retryable = true в структурированном ответе инструментов.
+func isRetryable(err error) bool {
+	return errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrUnavailable)
+}
+
+// retryDelay выбирает паузу: Retry-After от API, иначе экспоненциальный откат.
+func (c *Client) retryDelay(attempt int, retryAfter time.Duration) time.Duration {
+	if retryAfter > 0 {
+		if retryAfter > maxRetryDelay {
+			return maxRetryDelay
+		}
+		return retryAfter
+	}
+
+	delay := c.retryBackoff
+	for i := 1; i < attempt; i++ {
+		delay *= 2
+		if delay > maxRetryDelay {
+			return maxRetryDelay
+		}
+	}
+	return delay
+}
+
+// parseRetryAfter разбирает заголовок Retry-After: секунды или HTTP-дату.
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+
+	if at, err := http.ParseTime(value); err == nil {
+		if delay := at.Sub(now); delay > 0 {
+			return delay
+		}
+	}
+
+	return 0
+}
+
+// sleepCtx ждёт указанное время или отмену контекста.
+func sleepCtx(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("%w: waiting before retry: %v", ErrUnavailable, ctx.Err())
+	case <-timer.C:
+		return nil
+	}
 }
 
 // post — do + разбор ответа в out.

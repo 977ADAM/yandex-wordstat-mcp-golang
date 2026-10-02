@@ -69,6 +69,7 @@ func newTestClient(t *testing.T, fixture string, status int, calls *[]recordedRe
 	return wordstat.NewClient("test-api-key", "test-folder",
 		wordstat.WithBaseURL(srv.URL+"/v2/wordstat/"),
 		wordstat.WithClock(func() time.Time { return fixedNow }),
+		wordstat.WithRetries(1), // ретраи проверяются отдельно, в retry_test.go
 	)
 }
 
@@ -569,7 +570,10 @@ func TestErrorClassification(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 
-			c := wordstat.NewClient("test-api-key", "test-folder", wordstat.WithBaseURL(srv.URL+"/v2/wordstat/"))
+			c := wordstat.NewClient("test-api-key", "test-folder",
+				wordstat.WithBaseURL(srv.URL+"/v2/wordstat/"),
+				wordstat.WithRetries(1),
+			)
 
 			_, err := c.TopRequests(context.Background(), wordstat.TopParams{Phrase: "яндекс", NumPhrases: 5})
 			if err == nil {
@@ -592,7 +596,10 @@ func TestNetworkErrorIsUnavailable(t *testing.T) {
 	url := srv.URL
 	srv.Close() // сервер больше не слушает
 
-	c := wordstat.NewClient("test-api-key", "test-folder", wordstat.WithBaseURL(url+"/v2/wordstat/"))
+	c := wordstat.NewClient("test-api-key", "test-folder",
+		wordstat.WithBaseURL(url+"/v2/wordstat/"),
+		wordstat.WithRetries(1),
+	)
 
 	_, err := c.TopRequests(context.Background(), wordstat.TopParams{Phrase: "яндекс", NumPhrases: 5})
 	if !errors.Is(err, wordstat.ErrUnavailable) {
@@ -603,7 +610,10 @@ func TestNetworkErrorIsUnavailable(t *testing.T) {
 // TestValidationErrorsAreInvalidArgument проверяет, что ошибки валидации
 // помечены ErrInvalidArgument и потому попадают в код invalid_argument.
 func TestValidationErrorsAreInvalidArgument(t *testing.T) {
-	c := wordstat.NewClient("test-api-key", "test-folder", wordstat.WithBaseURL("http://127.0.0.1:1/v2/wordstat/"))
+	c := wordstat.NewClient("test-api-key", "test-folder",
+		wordstat.WithBaseURL("http://127.0.0.1:1/v2/wordstat/"),
+		wordstat.WithRetries(1),
+	)
 
 	tests := []struct {
 		name string
