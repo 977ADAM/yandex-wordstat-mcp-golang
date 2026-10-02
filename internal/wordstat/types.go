@@ -13,6 +13,9 @@ type TopRequestsResponse struct {
 	// в ответе API такого поля нет). Нужно, чтобы вызывающий код знал
 	// разрешённое значение по умолчанию.
 	NumPhrases int `json:"-"`
+	// Regions и Devices — фактически отправленный фильтр (пусто — без фильтра).
+	Regions []string `json:"-"`
+	Devices []string `json:"-"`
 
 	// TotalCount — общее число запросов, содержащих все ключевые слова (int64 → строка).
 	TotalCount string `json:"totalCount"`
@@ -35,6 +38,9 @@ type DynamicsResponse struct {
 	Period   string `json:"-"`
 	FromDate string `json:"-"`
 	ToDate   string `json:"-"`
+	// Regions и Devices — фактически отправленный фильтр (пусто — без фильтра).
+	Regions []string `json:"-"`
+	Devices []string `json:"-"`
 
 	// Results — точки временного ряда.
 	Results []DynamicsPoint `json:"results"`

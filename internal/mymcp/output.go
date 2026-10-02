@@ -1,11 +1,13 @@
 package mymcp
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/977ADAM/yandex-wordstat-mcp-golang/internal/wordstat"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Типы ниже описывают структурированный результат инструментов: SDK выводит из
@@ -16,13 +18,38 @@ import (
 // Числа: API отдаёт int64 строкой, а double — числом, поэтому при конвертации
 // count/totalCount разбираются в int64 (см. parseCount), а share и
 // affinityIndex остаются float64.
+//
+// Ошибки: при сбое инструмент возвращает isError = true и тот же тип выхода, но
+// с заполненным ToolStatus (поля данных при этом нулевые). Потребитель отличает
+// «нет данных» (HasData = false, Code пустой) от сбоя (Code заполнен).
+
+// ToolStatus — конверт ошибки инструмента. Встраивается в каждый выходной тип:
+// на успехе поля пустые и в JSON не попадают.
+type ToolStatus struct {
+	Code      string `json:"code,omitempty" jsonschema:"стабильный код ошибки: invalid_argument, quota_exceeded, upstream_unavailable, internal"`
+	Message   string `json:"message,omitempty" jsonschema:"текст ошибки от API или валидатора"`
+	Retryable *bool  `json:"retryable,omitempty" jsonschema:"true, если запрос имеет смысл повторить"`
+}
+
+// Стабильные коды ошибок инструментов.
+const (
+	CodeInvalidArgument     = "invalid_argument"
+	CodeQuotaExceeded       = "quota_exceeded"
+	CodeUpstreamUnavailable = "upstream_unavailable"
+	CodeInternal            = "internal"
+)
 
 // TopRequestsOutput — результат инструмента top_requests.
 type TopRequestsOutput struct {
+	ToolStatus
+
 	Phrase       string        `json:"phrase" jsonschema:"поисковая фраза"`
+	HasData      bool          `json:"hasData" jsonschema:"false — Wordstat не знает такой фразы, спроса нет; это не ошибка, а валидный ответ"`
 	TotalCount   int64         `json:"totalCount" jsonschema:"общее число запросов, содержащих все слова фразы, за 30 дней"`
-	Requests     []PhraseCount `json:"requests" jsonschema:"популярные запросы, по убыванию частотности"`
-	Associations []PhraseCount `json:"associations,omitempty" jsonschema:"похожие запросы"`
+	Requests     []PhraseCount `json:"requests" jsonschema:"популярные запросы по убыванию частотности; это подмножества totalCount, суммировать их нельзя"`
+	Associations []PhraseCount `json:"associations" jsonschema:"похожие запросы; не подмножества totalCount"`
+	Regions      []string      `json:"regions" jsonschema:"фактический фильтр по geo ID (пусто — вся Россия)"`
+	Devices      []string      `json:"devices" jsonschema:"фактический фильтр по устройствам (пусто — все устройства)"`
 }
 
 // PhraseCount — фраза и её частотность.
@@ -33,11 +60,15 @@ type PhraseCount struct {
 
 // DynamicsOutput — результат инструмента dynamics.
 type DynamicsOutput struct {
+	ToolStatus
+
 	Phrase   string          `json:"phrase" jsonschema:"поисковая фраза"`
 	Period   string          `json:"period" jsonschema:"фактическая детализация: PERIOD_DAILY, PERIOD_WEEKLY или PERIOD_MONTHLY"`
 	FromDate string          `json:"fromDate" jsonschema:"фактическое начало периода, RFC3339"`
 	ToDate   string          `json:"toDate" jsonschema:"фактический конец периода, RFC3339"`
 	Points   []DynamicsPoint `json:"points" jsonschema:"точки временного ряда"`
+	Regions  []string        `json:"regions" jsonschema:"фактический фильтр по geo ID (пусто — вся Россия)"`
+	Devices  []string        `json:"devices" jsonschema:"фактический фильтр по устройствам (пусто — все устройства)"`
 }
 
 // DynamicsPoint — одна точка временного ряда.
@@ -49,6 +80,8 @@ type DynamicsPoint struct {
 
 // RegionsOutput — результат инструмента regions.
 type RegionsOutput struct {
+	ToolStatus
+
 	Phrase  string        `json:"phrase" jsonschema:"поисковая фраза"`
 	Region  string        `json:"region" jsonschema:"фактическая группировка: REGION_ALL, REGION_CITIES или REGION_REGIONS"`
 	Regions []RegionCount `json:"regions" jsonschema:"распределение по регионам за 30 дней"`
@@ -69,6 +102,8 @@ type RegionCount struct {
 // плоский список с depth/parentId удобнее для машинной обработки. Текстовый
 // вывод при этом остаётся деревом с отступами (см. formatRegionTree).
 type RegionsTreeOutput struct {
+	ToolStatus
+
 	Count   int           `json:"count" jsonschema:"сколько всего регионов в справочнике"`
 	Regions []RegionEntry `json:"regions" jsonschema:"регионы в порядке обхода дерева"`
 }
@@ -79,6 +114,73 @@ type RegionEntry struct {
 	Name     string `json:"name" jsonschema:"название региона"`
 	Depth    int    `json:"depth" jsonschema:"уровень вложенности: 0 — корень"`
 	ParentID string `json:"parentId,omitempty" jsonschema:"ID родительского региона"`
+}
+
+// describeError превращает ошибку клиента в структурированный конверт.
+func describeError(err error) ToolStatus {
+	status := ToolStatus{Message: err.Error(), Retryable: boolPtr(false)}
+
+	switch {
+	case errors.Is(err, wordstat.ErrInvalidArgument):
+		status.Code = CodeInvalidArgument
+	case errors.Is(err, wordstat.ErrQuotaExceeded):
+		status.Code, status.Retryable = CodeQuotaExceeded, boolPtr(true)
+	case errors.Is(err, wordstat.ErrUnavailable):
+		status.Code, status.Retryable = CodeUpstreamUnavailable, boolPtr(true)
+	default:
+		status.Code = CodeInternal
+	}
+
+	return status
+}
+
+// boolPtr возвращает указатель на bool: с omitempty обычный false исчез бы из
+// JSON, а потребителю важно видеть retryable = false.
+func boolPtr(v bool) *bool { return &v }
+
+// errorCall собирает результат сбоя: isError + текст ошибки.
+func errorCall(err error) *mcp.CallToolResult {
+	return &mcp.CallToolResult{
+		IsError: true,
+		Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
+	}
+}
+
+// failedTopRequests — выход top_requests при сбое.
+func failedTopRequests(err error) TopRequestsOutput {
+	return TopRequestsOutput{
+		ToolStatus:   describeError(err),
+		Requests:     []PhraseCount{},
+		Associations: []PhraseCount{},
+		Regions:      []string{},
+		Devices:      []string{},
+	}
+}
+
+// failedDynamics — выход dynamics при сбое.
+func failedDynamics(err error) DynamicsOutput {
+	return DynamicsOutput{
+		ToolStatus: describeError(err),
+		Points:     []DynamicsPoint{},
+		Regions:    []string{},
+		Devices:    []string{},
+	}
+}
+
+// failedRegions — выход regions при сбое.
+func failedRegions(err error) RegionsOutput {
+	return RegionsOutput{
+		ToolStatus: describeError(err),
+		Regions:    []RegionCount{},
+	}
+}
+
+// failedRegionsTree — выход list_regions при сбое.
+func failedRegionsTree(err error) RegionsTreeOutput {
+	return RegionsTreeOutput{
+		ToolStatus: describeError(err),
+		Regions:    []RegionEntry{},
+	}
 }
 
 // topRequestsOutput конвертирует ответ API в структурированный результат.
@@ -99,9 +201,12 @@ func topRequestsOutput(phrase string, res *wordstat.TopRequestsResponse) (TopReq
 
 	return TopRequestsOutput{
 		Phrase:       phrase,
+		HasData:      total > 0,
 		TotalCount:   total,
 		Requests:     requests,
 		Associations: associations,
+		Regions:      nonNilStrings(res.Regions),
+		Devices:      nonNilStrings(res.Devices),
 	}, nil
 }
 
@@ -135,6 +240,8 @@ func dynamicsOutput(phrase string, res *wordstat.DynamicsResponse) (DynamicsOutp
 		FromDate: res.FromDate,
 		ToDate:   res.ToDate,
 		Points:   points,
+		Regions:  nonNilStrings(res.Regions),
+		Devices:  nonNilStrings(res.Devices),
 	}, nil
 }
 
@@ -171,6 +278,14 @@ func regionsTreeOutput(res *wordstat.RegionsTreeResponse) RegionsTreeOutput {
 	walk(res.Regions, 0, "")
 
 	return RegionsTreeOutput{Count: len(regions), Regions: regions}
+}
+
+// nonNilStrings возвращает пустой слайс вместо nil, чтобы в JSON был [], а не null.
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
 }
 
 // parseCount превращает count из API в число. protobuf int64 сериализуется

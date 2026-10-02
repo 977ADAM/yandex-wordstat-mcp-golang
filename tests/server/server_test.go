@@ -23,14 +23,14 @@ type stubClient struct{}
 
 var _ mymcp.WordstatClient = stubClient{}
 
-func (stubClient) TopRequests(_ context.Context, phrase string, _ int) (*wordstat.TopRequestsResponse, error) {
+func (stubClient) TopRequests(_ context.Context, params wordstat.TopParams) (*wordstat.TopRequestsResponse, error) {
 	return &wordstat.TopRequestsResponse{
 		TotalCount: "21500",
-		Results:    []wordstat.PhraseStat{{Phrase: phrase, Count: "1100"}},
+		Results:    []wordstat.PhraseStat{{Phrase: params.Phrase, Count: "1100"}},
 	}, nil
 }
 
-func (stubClient) Dynamics(_ context.Context, _, _, _, _ string) (*wordstat.DynamicsResponse, error) {
+func (stubClient) Dynamics(_ context.Context, _ wordstat.DynamicsParams) (*wordstat.DynamicsResponse, error) {
 	return &wordstat.DynamicsResponse{}, nil
 }
 

@@ -10,7 +10,9 @@ import (
 // formatTopRequests рендерит топ запросов и ассоциации.
 func formatTopRequests(phrase string, res *wordstat.TopRequestsResponse) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Фраза: %s\nВсего показов: %s\n\nПопулярные запросы:\n", phrase, res.TotalCount)
+	fmt.Fprintf(&b, "Фраза: %s\n", phrase)
+	b.WriteString(formatScope(res.Regions, res.Devices))
+	fmt.Fprintf(&b, "Всего показов: %s\n\nПопулярные запросы:\n", res.TotalCount)
 	if len(res.Results) == 0 {
 		b.WriteString("(пусто)\n")
 	}
@@ -30,6 +32,7 @@ func formatTopRequests(phrase string, res *wordstat.TopRequestsResponse) string 
 func formatDynamics(phrase string, res *wordstat.DynamicsResponse) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Динамика для «%s»:\n", phrase)
+	b.WriteString(formatScope(res.Regions, res.Devices))
 	if len(res.Results) == 0 {
 		b.WriteString("(пусто)\n")
 	}
@@ -37,6 +40,23 @@ func formatDynamics(phrase string, res *wordstat.DynamicsResponse) string {
 		fmt.Fprintf(&b, "%s: count=%s share=%g\n", p.Date, p.Count, p.Share)
 	}
 	return b.String()
+}
+
+// formatScope рендерит фактический фильтр запроса: по нему видно, что именно
+// ушло в API, включая подставленные по умолчанию значения.
+func formatScope(regions, devices []string) string {
+	if len(regions) == 0 && len(devices) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, 2)
+	if len(regions) > 0 {
+		parts = append(parts, "регионы: "+strings.Join(regions, ", "))
+	}
+	if len(devices) > 0 {
+		parts = append(parts, "устройства: "+strings.Join(devices, ", "))
+	}
+	return "Фильтр — " + strings.Join(parts, "; ") + "\n"
 }
 
 // formatRegions рендерит распределение по регионам.

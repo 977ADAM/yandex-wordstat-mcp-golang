@@ -3,9 +3,12 @@
 package wordstat_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"strconv"
 
 	"github.com/977ADAM/yandex-wordstat-mcp-golang/internal/wordstat"
 )
@@ -279,5 +282,147 @@ func TestResolveDynamicsRangeWeeklyFromIsMonday(t *testing.T) {
 		if !toTime.Before(now.AddDate(0, 0, 1)) {
 			t.Fatalf("now=%s: toDate %s is in the future", now.Format(dateLayout), to)
 		}
+	}
+}
+
+func TestNormalizeDevices(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      []string
+		want    []string
+		wantErr string
+	}{
+		{
+			name: "пустой список — валидные «все устройства»",
+			in:   nil,
+			want: nil,
+		},
+		{
+			name: "регистр не важен, дубли убираются, порядок сохраняется",
+			in:   []string{"Phone", "desktop", "phone", " DESKTOP "},
+			want: []string{wordstat.DevicePhone, wordstat.DeviceDesktop},
+		},
+		{
+			name: "готовые DEVICE_* принимаются",
+			in:   []string{"DEVICE_TABLET", "DEVICE_ALL"},
+			want: []string{wordstat.DeviceTablet, wordstat.DeviceAll},
+		},
+		{
+			name:    "неизвестное устройство",
+			in:      []string{"watch"},
+			wantErr: `invalid device "watch": allowed all, desktop, phone, tablet`,
+		},
+		{
+			name:    "больше трёх устройств",
+			in:      []string{"all", "desktop", "phone", "tablet"},
+			wantErr: "too many devices: 4, allowed at most 3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := wordstat.NormalizeDevices(tt.in)
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("NormalizeDevices(%v) = %v, want error", tt.in, got)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %q, want substring %q", err.Error(), tt.wantErr)
+				}
+				if !errors.Is(err, wordstat.ErrInvalidArgument) {
+					t.Errorf("errors.Is(err, ErrInvalidArgument) = false, err = %v", err)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("NormalizeDevices(%v) unexpected error: %v", tt.in, err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("NormalizeDevices(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("NormalizeDevices(%v) = %v, want %v", tt.in, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateRegions(t *testing.T) {
+	tooMany := make([]string, 0, wordstat.MaxRegions+1)
+	for i := 0; i <= wordstat.MaxRegions; i++ {
+		tooMany = append(tooMany, strconv.Itoa(1000+i))
+	}
+
+	tests := []struct {
+		name    string
+		in      []string
+		want    []string
+		wantErr string
+	}{
+		{
+			name: "пустой список — валидная «вся Россия»",
+			in:   nil,
+			want: nil,
+		},
+		{
+			name: "дубли и пробелы нормализуются",
+			in:   []string{"213", " 1 ", "213", "225"},
+			want: []string{"213", "1", "225"},
+		},
+		{
+			name:    "нецифровой регион",
+			in:      []string{"abc"},
+			wantErr: `invalid region "abc": expected numeric geo id`,
+		},
+		{
+			name:    "пустой регион",
+			in:      []string{""},
+			wantErr: `invalid region "": expected numeric geo id`,
+		},
+		{
+			name:    "регион с буквами и цифрами",
+			in:      []string{"213a"},
+			wantErr: `invalid region "213a": expected numeric geo id`,
+		},
+		{
+			name:    "больше лимита proto",
+			in:      tooMany,
+			wantErr: "too many regions: 101, allowed at most 100",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := wordstat.ValidateRegions(tt.in)
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("ValidateRegions(%v) = %v, want error", tt.in, got)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %q, want substring %q", err.Error(), tt.wantErr)
+				}
+				if !errors.Is(err, wordstat.ErrInvalidArgument) {
+					t.Errorf("errors.Is(err, ErrInvalidArgument) = false, err = %v", err)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("ValidateRegions(%v) unexpected error: %v", tt.in, err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("ValidateRegions(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("ValidateRegions(%v) = %v, want %v", tt.in, got, tt.want)
+				}
+			}
+		})
 	}
 }

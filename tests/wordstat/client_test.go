@@ -5,11 +5,13 @@ package wordstat_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,15 @@ import (
 
 // fixedNow — детерминированное «сейчас» (четверг) для проверки дефолтных диапазонов.
 var fixedNow = time.Date(2026, 10, 1, 12, 30, 0, 0, time.UTC)
+
+// tooManyRegions — 101 уникальный geo ID: на один больше лимита proto.
+var tooManyRegions = func() []string {
+	regions := make([]string, 0, wordstat.MaxRegions+1)
+	for i := 0; i <= wordstat.MaxRegions; i++ {
+		regions = append(regions, strconv.Itoa(1000+i))
+	}
+	return regions
+}()
 
 type recordedRequest struct {
 	path string
@@ -64,9 +75,11 @@ func newTestClient(t *testing.T, fixture string, status int, calls *[]recordedRe
 func TestClientMethods(t *testing.T) {
 	// Эхо фактически отправленных параметров (NumPhrases/Period/Region) заполняет
 	// клиент, поэтому ожидания строятся функциями.
-	topRequestsWant := func(numPhrases int) *wordstat.TopRequestsResponse {
+	topRequestsWant := func(numPhrases int, regions, devices []string) *wordstat.TopRequestsResponse {
 		return &wordstat.TopRequestsResponse{
 			NumPhrases: numPhrases,
+			Regions:    regions,
+			Devices:    devices,
 			TotalCount: "21500",
 			Results: []wordstat.PhraseStat{
 				{Phrase: "чат боты для бизнеса", Count: "1100"},
@@ -78,11 +91,13 @@ func TestClientMethods(t *testing.T) {
 			},
 		}
 	}
-	dynamicsWant := func(period, from, to string) *wordstat.DynamicsResponse {
+	dynamicsWant := func(period, from, to string, regions, devices []string) *wordstat.DynamicsResponse {
 		return &wordstat.DynamicsResponse{
 			Period:   period,
 			FromDate: from,
 			ToDate:   to,
+			Regions:  regions,
+			Devices:  devices,
 			Results: []wordstat.DynamicsPoint{
 				{Date: "2026-01-31T00:00:00Z", Count: "1050", Share: 8.7e-06},
 				{Date: "2026-02-28T00:00:00Z", Count: "1180", Share: 9.4e-06},
@@ -115,7 +130,7 @@ func TestClientMethods(t *testing.T) {
 			name:    "topRequests: numPhrases по умолчанию",
 			fixture: "top_requests.json",
 			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
-				return c.TopRequests(ctx, "чат бот для бизнеса", 0)
+				return c.TopRequests(ctx, wordstat.TopParams{Phrase: "чат бот для бизнеса"})
 			},
 			wantPath: "/v2/wordstat/topRequests",
 			wantPayload: map[string]any{
@@ -123,13 +138,13 @@ func TestClientMethods(t *testing.T) {
 				"numPhrases": float64(wordstat.DefaultNumPhrases),
 				"folderId":   "test-folder",
 			},
-			want: topRequestsWant(wordstat.DefaultNumPhrases),
+			want: topRequestsWant(wordstat.DefaultNumPhrases, nil, nil),
 		},
 		{
 			name:    "topRequests: явный numPhrases",
 			fixture: "top_requests.json",
 			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
-				return c.TopRequests(ctx, "яндекс", 100)
+				return c.TopRequests(ctx, wordstat.TopParams{Phrase: "яндекс", NumPhrases: 100})
 			},
 			wantPath: "/v2/wordstat/topRequests",
 			wantPayload: map[string]any{
@@ -137,13 +152,13 @@ func TestClientMethods(t *testing.T) {
 				"numPhrases": float64(100),
 				"folderId":   "test-folder",
 			},
-			want: topRequestsWant(100),
+			want: topRequestsWant(100, nil, nil),
 		},
 		{
 			name:    "topRequests: numPhrases выше границы proto",
 			fixture: "top_requests.json",
 			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
-				return c.TopRequests(ctx, "яндекс", 2001)
+				return c.TopRequests(ctx, wordstat.TopParams{Phrase: "яндекс", NumPhrases: 2001})
 			},
 			wantErr:    "numPhrases must be in 1..2000",
 			wantNoCall: true,
@@ -152,7 +167,7 @@ func TestClientMethods(t *testing.T) {
 			name:    "topRequests: пустая фраза",
 			fixture: "top_requests.json",
 			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
-				return c.TopRequests(ctx, "   ", 10)
+				return c.TopRequests(ctx, wordstat.TopParams{Phrase: "   ", NumPhrases: 10})
 			},
 			wantErr:    "phrase must not be empty",
 			wantNoCall: true,
@@ -161,7 +176,7 @@ func TestClientMethods(t *testing.T) {
 			name:    "dynamics: monthly с явными датами (YYYY-MM-DD → RFC3339)",
 			fixture: "dynamics.json",
 			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
-				return c.Dynamics(ctx, "чат бот для бизнеса", "monthly", "2026-01-01", "2026-03-31")
+				return c.Dynamics(ctx, wordstat.DynamicsParams{Phrase: "чат бот для бизнеса", Period: "monthly", FromDate: "2026-01-01", ToDate: "2026-03-31"})
 			},
 			wantPath: "/v2/wordstat/dynamics",
 			wantPayload: map[string]any{
@@ -171,13 +186,13 @@ func TestClientMethods(t *testing.T) {
 				"toDate":   "2026-03-31T00:00:00Z",
 				"folderId": "test-folder",
 			},
-			want: dynamicsWant(wordstat.PeriodMonthly, "2026-01-01T00:00:00Z", "2026-03-31T00:00:00Z"),
+			want: dynamicsWant(wordstat.PeriodMonthly, "2026-01-01T00:00:00Z", "2026-03-31T00:00:00Z", nil, nil),
 		},
 		{
 			name:    "dynamics: period по умолчанию и диапазон 12 месяцев",
 			fixture: "dynamics.json",
 			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
-				return c.Dynamics(ctx, "яндекс", "", "", "")
+				return c.Dynamics(ctx, wordstat.DynamicsParams{Phrase: "яндекс"})
 			},
 			wantPath: "/v2/wordstat/dynamics",
 			wantPayload: map[string]any{
@@ -187,13 +202,13 @@ func TestClientMethods(t *testing.T) {
 				"toDate":   "2026-09-30T00:00:00Z",
 				"folderId": "test-folder",
 			},
-			want: dynamicsWant(wordstat.PeriodMonthly, "2025-10-01T00:00:00Z", "2026-09-30T00:00:00Z"),
+			want: dynamicsWant(wordstat.PeriodMonthly, "2025-10-01T00:00:00Z", "2026-09-30T00:00:00Z", nil, nil),
 		},
 		{
 			name:    "dynamics: weekly с понедельника по воскресенье",
 			fixture: "dynamics.json",
 			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
-				return c.Dynamics(ctx, "яндекс", "PERIOD_WEEKLY", "2026-03-02T10:00:00Z", "2026-04-05T23:59:59Z")
+				return c.Dynamics(ctx, wordstat.DynamicsParams{Phrase: "яндекс", Period: "PERIOD_WEEKLY", FromDate: "2026-03-02T10:00:00Z", ToDate: "2026-04-05T23:59:59Z"})
 			},
 			wantPath: "/v2/wordstat/dynamics",
 			wantPayload: map[string]any{
@@ -203,13 +218,13 @@ func TestClientMethods(t *testing.T) {
 				"toDate":   "2026-04-05T00:00:00Z",
 				"folderId": "test-folder",
 			},
-			want: dynamicsWant(wordstat.PeriodWeekly, "2026-03-02T00:00:00Z", "2026-04-05T00:00:00Z"),
+			want: dynamicsWant(wordstat.PeriodWeekly, "2026-03-02T00:00:00Z", "2026-04-05T00:00:00Z", nil, nil),
 		},
 		{
 			name:    "dynamics: weekly по умолчанию (12 недель)",
 			fixture: "dynamics.json",
 			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
-				return c.Dynamics(ctx, "яндекс", "weekly", "", "")
+				return c.Dynamics(ctx, wordstat.DynamicsParams{Phrase: "яндекс", Period: "weekly"})
 			},
 			wantPath: "/v2/wordstat/dynamics",
 			wantPayload: map[string]any{
@@ -219,13 +234,13 @@ func TestClientMethods(t *testing.T) {
 				"toDate":   "2026-09-27T00:00:00Z",
 				"folderId": "test-folder",
 			},
-			want: dynamicsWant(wordstat.PeriodWeekly, "2026-07-06T00:00:00Z", "2026-09-27T00:00:00Z"),
+			want: dynamicsWant(wordstat.PeriodWeekly, "2026-07-06T00:00:00Z", "2026-09-27T00:00:00Z", nil, nil),
 		},
 		{
 			name:    "dynamics: daily по умолчанию (60 дней)",
 			fixture: "dynamics.json",
 			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
-				return c.Dynamics(ctx, "яндекс", "daily", "", "")
+				return c.Dynamics(ctx, wordstat.DynamicsParams{Phrase: "яндекс", Period: "daily"})
 			},
 			wantPath: "/v2/wordstat/dynamics",
 			wantPayload: map[string]any{
@@ -235,13 +250,13 @@ func TestClientMethods(t *testing.T) {
 				"toDate":   "2026-09-30T00:00:00Z",
 				"folderId": "test-folder",
 			},
-			want: dynamicsWant(wordstat.PeriodDaily, "2026-08-02T00:00:00Z", "2026-09-30T00:00:00Z"),
+			want: dynamicsWant(wordstat.PeriodDaily, "2026-08-02T00:00:00Z", "2026-09-30T00:00:00Z", nil, nil),
 		},
 		{
 			name:    "dynamics: неизвестный period",
 			fixture: "dynamics.json",
 			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
-				return c.Dynamics(ctx, "яндекс", "yearly", "", "")
+				return c.Dynamics(ctx, wordstat.DynamicsParams{Phrase: "яндекс", Period: "yearly"})
 			},
 			wantErr:    `invalid period "yearly"`,
 			wantNoCall: true,
@@ -250,7 +265,7 @@ func TestClientMethods(t *testing.T) {
 			name:    "dynamics: monthly с fromDate не первого числа",
 			fixture: "dynamics.json",
 			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
-				return c.Dynamics(ctx, "яндекс", "monthly", "2026-01-15", "2026-03-31")
+				return c.Dynamics(ctx, wordstat.DynamicsParams{Phrase: "яндекс", Period: "monthly", FromDate: "2026-01-15", ToDate: "2026-03-31"})
 			},
 			wantErr:    "must be the first day of a month",
 			wantNoCall: true,
@@ -316,11 +331,111 @@ func TestClientMethods(t *testing.T) {
 			},
 		},
 		{
+			name:    "topRequests: регионы и устройства уходят в payload",
+			fixture: "top_requests.json",
+			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
+				return c.TopRequests(ctx, wordstat.TopParams{
+					Phrase:  "зимняя резина",
+					Regions: []string{"213", "1", "213"},
+					Devices: []string{"Phone", "desktop", "phone"},
+				})
+			},
+			wantPath: "/v2/wordstat/topRequests",
+			wantPayload: map[string]any{
+				"phrase":     "зимняя резина",
+				"numPhrases": float64(wordstat.DefaultNumPhrases),
+				"folderId":   "test-folder",
+				"regions":    []any{"213", "1"},
+				"devices":    []any{wordstat.DevicePhone, wordstat.DeviceDesktop},
+			},
+			want: topRequestsWant(wordstat.DefaultNumPhrases, []string{"213", "1"}, []string{wordstat.DevicePhone, wordstat.DeviceDesktop}),
+		},
+		{
+			name:    "topRequests: пустые списки не попадают в payload",
+			fixture: "top_requests.json",
+			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
+				return c.TopRequests(ctx, wordstat.TopParams{
+					Phrase:  "яндекс",
+					Regions: []string{},
+					Devices: []string{},
+				})
+			},
+			wantPath: "/v2/wordstat/topRequests",
+			wantPayload: map[string]any{
+				"phrase":     "яндекс",
+				"numPhrases": float64(wordstat.DefaultNumPhrases),
+				"folderId":   "test-folder",
+			},
+			want: topRequestsWant(wordstat.DefaultNumPhrases, nil, nil),
+		},
+		{
+			name:    "topRequests: нецифровой регион",
+			fixture: "top_requests.json",
+			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
+				return c.TopRequests(ctx, wordstat.TopParams{Phrase: "яндекс", Regions: []string{"abc"}})
+			},
+			wantErr:    `invalid region "abc": expected numeric geo id`,
+			wantNoCall: true,
+		},
+		{
+			name:    "topRequests: регионов больше лимита",
+			fixture: "top_requests.json",
+			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
+				return c.TopRequests(ctx, wordstat.TopParams{Phrase: "яндекс", Regions: tooManyRegions})
+			},
+			wantErr:    "too many regions: 101, allowed at most 100",
+			wantNoCall: true,
+		},
+		{
+			name:    "topRequests: неизвестное устройство",
+			fixture: "top_requests.json",
+			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
+				return c.TopRequests(ctx, wordstat.TopParams{Phrase: "яндекс", Devices: []string{"watch"}})
+			},
+			wantErr:    `invalid device "watch": allowed all, desktop, phone, tablet`,
+			wantNoCall: true,
+		},
+		{
+			name:    "topRequests: устройств больше лимита",
+			fixture: "top_requests.json",
+			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
+				return c.TopRequests(ctx, wordstat.TopParams{
+					Phrase:  "яндекс",
+					Devices: []string{"all", "desktop", "phone", "tablet"},
+				})
+			},
+			wantErr:    "too many devices: 4, allowed at most 3",
+			wantNoCall: true,
+		},
+		{
+			name:    "dynamics: регионы и устройства уходят в payload",
+			fixture: "dynamics.json",
+			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
+				return c.Dynamics(ctx, wordstat.DynamicsParams{
+					Phrase:  "зимняя резина",
+					Period:  "monthly",
+					Regions: []string{"213"},
+					Devices: []string{"all"},
+				})
+			},
+			wantPath: "/v2/wordstat/dynamics",
+			wantPayload: map[string]any{
+				"phrase":   "зимняя резина",
+				"period":   wordstat.PeriodMonthly,
+				"fromDate": "2025-10-01T00:00:00Z",
+				"toDate":   "2026-09-30T00:00:00Z",
+				"folderId": "test-folder",
+				"regions":  []any{"213"},
+				"devices":  []any{wordstat.DeviceAll},
+			},
+			want: dynamicsWant(wordstat.PeriodMonthly, "2025-10-01T00:00:00Z", "2026-09-30T00:00:00Z", []string{"213"}, []string{wordstat.DeviceAll}),
+		},
+		{
 			name:    "ошибка API: сообщение из JSON попадает в текст ошибки",
 			fixture: "error_invalid_argument.json",
 			status:  http.StatusBadRequest,
 			call: func(ctx context.Context, c *wordstat.Client) (any, error) {
-				return c.TopRequests(ctx, "яндекс", 10)
+				return c.TopRequests(ctx, wordstat.TopParams{Phrase: "яндекс", NumPhrases: 10})
 			},
 			wantPath: "/v2/wordstat/topRequests",
 			wantPayload: map[string]any{
@@ -328,7 +443,7 @@ func TestClientMethods(t *testing.T) {
 				"numPhrases": float64(10),
 				"folderId":   "test-folder",
 			},
-			wantErr: "unexpected status 400: rpc error: code = InvalidArgument desc = The to field value should be the last day of the month",
+			wantErr: "invalid argument: HTTP 400: rpc error: code = InvalidArgument desc = The to field value should be the last day of the month",
 		},
 	}
 
@@ -378,6 +493,151 @@ func TestClientMethods(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("result = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestErrorClassification проверяет, что сбои API разбираются по sentinel-ошибкам,
+// а текст от API сохраняется.
+func TestErrorClassification(t *testing.T) {
+	tests := []struct {
+		name         string
+		status       int
+		body         string
+		wantSentinel error
+		wantMessage  string
+	}{
+		{
+			name:         "400 → invalid argument",
+			status:       http.StatusBadRequest,
+			body:         `{"code":3,"message":"rpc error: code = InvalidArgument desc = phrase is too long"}`,
+			wantSentinel: wordstat.ErrInvalidArgument,
+			wantMessage:  "phrase is too long",
+		},
+		{
+			name:         "429 → quota exceeded",
+			status:       http.StatusTooManyRequests,
+			body:         `{"code":8,"message":"quota exceeded"}`,
+			wantSentinel: wordstat.ErrQuotaExceeded,
+			wantMessage:  "quota exceeded",
+		},
+		{
+			name:         "500 → upstream unavailable",
+			status:       http.StatusInternalServerError,
+			body:         `{"code":13,"message":"internal error"}`,
+			wantSentinel: wordstat.ErrUnavailable,
+			wantMessage:  "internal error",
+		},
+		{
+			name:         "503 без тела → upstream unavailable",
+			status:       http.StatusServiceUnavailable,
+			body:         ``,
+			wantSentinel: wordstat.ErrUnavailable,
+		},
+		{
+			name:         "403 → internal (проблема доступа на нашей стороне)",
+			status:       http.StatusForbidden,
+			body:         `{"code":7,"message":"permission denied"}`,
+			wantSentinel: wordstat.ErrInternal,
+			wantMessage:  "permission denied",
+		},
+		{
+			name:         "ошибка внутри HTTP 200 → не «спроса нет», а сбой",
+			status:       http.StatusOK,
+			body:         `{"code":3,"message":"rpc error: code = InvalidArgument desc = bad region"}`,
+			wantSentinel: wordstat.ErrInvalidArgument,
+			wantMessage:  "bad region",
+		},
+		{
+			name:         "недоступность внутри HTTP 200",
+			status:       http.StatusOK,
+			body:         `{"code":14,"message":"unavailable"}`,
+			wantSentinel: wordstat.ErrUnavailable,
+			wantMessage:  "unavailable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			t.Cleanup(srv.Close)
+
+			c := wordstat.NewClient("test-api-key", "test-folder", wordstat.WithBaseURL(srv.URL+"/v2/wordstat/"))
+
+			_, err := c.TopRequests(context.Background(), wordstat.TopParams{Phrase: "яндекс", NumPhrases: 5})
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !errors.Is(err, tt.wantSentinel) {
+				t.Errorf("errors.Is(err, %v) = false, err = %v", tt.wantSentinel, err)
+			}
+			if tt.wantMessage != "" && !strings.Contains(err.Error(), tt.wantMessage) {
+				t.Errorf("error %q does not contain %q", err.Error(), tt.wantMessage)
+			}
+		})
+	}
+}
+
+// TestNetworkErrorIsUnavailable проверяет, что сетевой сбой — это ErrUnavailable
+// (повтор имеет смысл), а не «данных нет».
+func TestNetworkErrorIsUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := srv.URL
+	srv.Close() // сервер больше не слушает
+
+	c := wordstat.NewClient("test-api-key", "test-folder", wordstat.WithBaseURL(url+"/v2/wordstat/"))
+
+	_, err := c.TopRequests(context.Background(), wordstat.TopParams{Phrase: "яндекс", NumPhrases: 5})
+	if !errors.Is(err, wordstat.ErrUnavailable) {
+		t.Fatalf("errors.Is(err, ErrUnavailable) = false, err = %v", err)
+	}
+}
+
+// TestValidationErrorsAreInvalidArgument проверяет, что ошибки валидации
+// помечены ErrInvalidArgument и потому попадают в код invalid_argument.
+func TestValidationErrorsAreInvalidArgument(t *testing.T) {
+	c := wordstat.NewClient("test-api-key", "test-folder", wordstat.WithBaseURL("http://127.0.0.1:1/v2/wordstat/"))
+
+	tests := []struct {
+		name string
+		call func() (any, error)
+	}{
+		{
+			name: "пустая фраза",
+			call: func() (any, error) {
+				return c.TopRequests(context.Background(), wordstat.TopParams{Phrase: " "})
+			},
+		},
+		{
+			name: "слишком большой numPhrases",
+			call: func() (any, error) {
+				return c.TopRequests(context.Background(), wordstat.TopParams{Phrase: "яндекс", NumPhrases: 2001})
+			},
+		},
+		{
+			name: "неизвестный period",
+			call: func() (any, error) {
+				return c.Dynamics(context.Background(), wordstat.DynamicsParams{Phrase: "яндекс", Period: "yearly"})
+			},
+		},
+		{
+			name: "неизвестный regionMode",
+			call: func() (any, error) {
+				return c.Regions(context.Background(), "яндекс", "districts")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.call()
+			if !errors.Is(err, wordstat.ErrInvalidArgument) {
+				t.Fatalf("errors.Is(err, ErrInvalidArgument) = false, err = %v", err)
 			}
 		})
 	}

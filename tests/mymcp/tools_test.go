@@ -17,14 +17,14 @@ import (
 )
 
 // fakeClient записывает переданные аргументы и отдаёт заранее заданные ответы.
-// Поля-эхо (NumPhrases/Period/Region) заполняются так же, как это делает
-// настоящий клиент.
+// Валидация и эхо параметров повторяют поведение настоящего клиента, чтобы
+// тесты уровня инструментов видели тот же контракт.
 type fakeClient struct {
 	topPhrase     string
 	topNum        int
-	dynPeriod     string
-	dynFrom       string
-	dynTo         string
+	topRegions    []string
+	topDevices    []string
+	dynParams     wordstat.DynamicsParams
 	regionMode    string
 	treeCalls     int
 	err           error
@@ -37,22 +37,48 @@ type fakeClient struct {
 // Проверка на этапе компиляции, что заглушка реализует интерфейс инструментов.
 var _ mymcp.WordstatClient = (*fakeClient)(nil)
 
-func (f *fakeClient) TopRequests(_ context.Context, phrase string, numPhrases int) (*wordstat.TopRequestsResponse, error) {
-	f.topPhrase, f.topNum = phrase, numPhrases
+func (f *fakeClient) TopRequests(_ context.Context, params wordstat.TopParams) (*wordstat.TopRequestsResponse, error) {
+	f.topPhrase, f.topNum = params.Phrase, params.NumPhrases
+
+	regions, err := wordstat.ValidateRegions(params.Regions)
+	if err != nil {
+		return nil, err
+	}
+	devices, err := wordstat.NormalizeDevices(params.Devices)
+	if err != nil {
+		return nil, err
+	}
+	f.topRegions, f.topDevices = regions, devices
+
 	if f.err != nil {
 		return nil, f.err
 	}
+
 	res := *f.topResponse
-	res.NumPhrases = numPhrases
+	res.NumPhrases = params.NumPhrases
+	res.Regions, res.Devices = regions, devices
 	return &res, nil
 }
 
-func (f *fakeClient) Dynamics(_ context.Context, phrase, period, fromDate, toDate string) (*wordstat.DynamicsResponse, error) {
-	f.topPhrase, f.dynPeriod, f.dynFrom, f.dynTo = phrase, period, fromDate, toDate
+func (f *fakeClient) Dynamics(_ context.Context, params wordstat.DynamicsParams) (*wordstat.DynamicsResponse, error) {
+	f.dynParams = params
+
+	regions, err := wordstat.ValidateRegions(params.Regions)
+	if err != nil {
+		return nil, err
+	}
+	devices, err := wordstat.NormalizeDevices(params.Devices)
+	if err != nil {
+		return nil, err
+	}
+
 	if f.err != nil {
 		return nil, f.err
 	}
-	return f.dynResponse, nil
+
+	res := *f.dynResponse
+	res.Regions, res.Devices = regions, devices
+	return &res, nil
 }
 
 func (f *fakeClient) Regions(_ context.Context, phrase, regionMode string) (*wordstat.RegionsResponse, error) {
@@ -142,6 +168,19 @@ func textOf(t *testing.T, name string, res *mcp.CallToolResult) string {
 	return text.Text
 }
 
+// resultText достаёт текст из любого результата, включая ошибочный.
+func resultText(t *testing.T, name string, res *mcp.CallToolResult) string {
+	t.Helper()
+	if len(res.Content) == 0 {
+		t.Fatalf("call %s: no content", name)
+	}
+	text, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("call %s: content is %T, want *mcp.TextContent", name, res.Content[0])
+	}
+	return text.Text
+}
+
 // structuredJSON достаёт structuredContent в виде JSON.
 func structuredJSON(t *testing.T, name string, res *mcp.CallToolResult) string {
 	t.Helper()
@@ -153,6 +192,16 @@ func structuredJSON(t *testing.T, name string, res *mcp.CallToolResult) string {
 		t.Fatalf("call %s: marshal structuredContent: %v", name, err)
 	}
 	return string(raw)
+}
+
+// structuredInto разбирает structuredContent в типизированный результат.
+func structuredInto[T any](t *testing.T, name string, res *mcp.CallToolResult) T {
+	t.Helper()
+	var out T
+	if err := json.Unmarshal([]byte(structuredJSON(t, name, res)), &out); err != nil {
+		t.Fatalf("call %s: unmarshal structuredContent: %v", name, err)
+	}
+	return out
 }
 
 // assertStructured сравнивает structuredContent с ожидаемой структурой.
@@ -222,20 +271,26 @@ func TestRegisteredTools(t *testing.T) {
 				t.Errorf("tool %s property %s description leaks jsonschema keyword: %q", name, prop, desc)
 			}
 		}
-		if required, _ := schema["required"].([]any); name == "top_requests" {
-			if len(required) != 1 || required[0] != "phrase" {
-				t.Errorf("top_requests required = %v, want [phrase]", required)
+	}
+
+	// Новый контракт: регионы и устройства в аргументах top_requests/dynamics.
+	for _, name := range []string{"top_requests", "dynamics"} {
+		schema, _ := byName[name].InputSchema.(map[string]any)
+		props, _ := schema["properties"].(map[string]any)
+		for _, field := range []string{"regions", "devices"} {
+			if _, ok := props[field]; !ok {
+				t.Errorf("tool %s has no %q argument", name, field)
 			}
 		}
 	}
 
-	// Схема вывода top_requests: обязательные поля структурированного результата.
+	// Схема вывода: данные, hasData и конверт ошибки.
 	outputSchema, ok := byName["top_requests"].OutputSchema.(map[string]any)
 	if !ok {
 		t.Fatalf("top_requests: unexpected output schema type %T", byName["top_requests"].OutputSchema)
 	}
 	outProps, _ := outputSchema["properties"].(map[string]any)
-	for _, field := range []string{"phrase", "totalCount", "requests"} {
+	for _, field := range []string{"phrase", "hasData", "totalCount", "requests", "regions", "devices", "code", "message", "retryable"} {
 		if _, ok := outProps[field]; !ok {
 			t.Errorf("top_requests outputSchema has no %q property", field)
 		}
@@ -243,6 +298,8 @@ func TestRegisteredTools(t *testing.T) {
 }
 
 func TestCallTools(t *testing.T) {
+	emptyStrings := []string{}
+
 	tests := []struct {
 		name       string
 		tool       string
@@ -261,11 +318,14 @@ func TestCallTools(t *testing.T) {
 				"Похожие запросы:\n- чатбот нейросеть: 372\n",
 			wantStruct: mymcp.TopRequestsOutput{
 				Phrase:     "чат бот для бизнеса",
+				HasData:    true,
 				TotalCount: 21500,
 				Requests:   []mymcp.PhraseCount{{Phrase: "чатбот", Count: 7371}},
 				Associations: []mymcp.PhraseCount{
 					{Phrase: "чатбот нейросеть", Count: 372},
 				},
+				Regions: emptyStrings,
+				Devices: emptyStrings,
 			},
 			wantCheck: func(t *testing.T, f *fakeClient) {
 				if f.topPhrase != "чат бот для бизнеса" || f.topNum != 5 {
@@ -274,25 +334,64 @@ func TestCallTools(t *testing.T) {
 			},
 		},
 		{
-			name: "dynamics: фактическое окно попадает в структуру",
+			name: "top_requests: фильтр по региону и устройству",
+			tool: "top_requests",
+			args: map[string]any{
+				"phrase":  "зимняя резина",
+				"regions": []any{"213", "1", "213"},
+				"devices": []any{"Phone", "desktop"},
+			},
+			wantText: "Фраза: зимняя резина\n" +
+				"Фильтр — регионы: 213, 1; устройства: DEVICE_PHONE, DEVICE_DESKTOP\n" +
+				"Всего показов: 21500\n\n" +
+				"Популярные запросы:\n- чатбот: 7371\n\n" +
+				"Похожие запросы:\n- чатбот нейросеть: 372\n",
+			wantStruct: mymcp.TopRequestsOutput{
+				Phrase:     "зимняя резина",
+				HasData:    true,
+				TotalCount: 21500,
+				Requests:   []mymcp.PhraseCount{{Phrase: "чатбот", Count: 7371}},
+				Associations: []mymcp.PhraseCount{
+					{Phrase: "чатбот нейросеть", Count: 372},
+				},
+				Regions: []string{"213", "1"},
+				Devices: []string{wordstat.DevicePhone, wordstat.DeviceDesktop},
+			},
+			wantCheck: func(t *testing.T, f *fakeClient) {
+				if !reflect.DeepEqual(f.topRegions, []string{"213", "1"}) {
+					t.Errorf("regions = %v, want [213 1]", f.topRegions)
+				}
+				if !reflect.DeepEqual(f.topDevices, []string{wordstat.DevicePhone, wordstat.DeviceDesktop}) {
+					t.Errorf("devices = %v", f.topDevices)
+				}
+			},
+		},
+		{
+			name: "dynamics: фактическое окно и фильтр в структуре",
 			tool: "dynamics",
 			args: map[string]any{
 				"phrase":   "яндекс",
 				"period":   "daily",
 				"fromDate": "2026-01-01",
 				"toDate":   "2026-01-31",
+				"regions":  []any{"213"},
+				"devices":  []any{"tablet"},
 			},
-			wantText: "Динамика для «яндекс»:\n2026-01-31T00:00:00Z: count=1050 share=8.7e-06\n",
+			wantText: "Динамика для «яндекс»:\n" +
+				"Фильтр — регионы: 213; устройства: DEVICE_TABLET\n" +
+				"2026-01-31T00:00:00Z: count=1050 share=8.7e-06\n",
 			wantStruct: mymcp.DynamicsOutput{
 				Phrase:   "яндекс",
 				Period:   wordstat.PeriodDaily,
 				FromDate: "2026-01-01T00:00:00Z",
 				ToDate:   "2026-01-31T00:00:00Z",
 				Points:   []mymcp.DynamicsPoint{{Date: "2026-01-31T00:00:00Z", Count: 1050, Share: 8.7e-06}},
+				Regions:  []string{"213"},
+				Devices:  []string{wordstat.DeviceTablet},
 			},
 			wantCheck: func(t *testing.T, f *fakeClient) {
-				if f.dynPeriod != "daily" || f.dynFrom != "2026-01-01" || f.dynTo != "2026-01-31" {
-					t.Errorf("got period=%q from=%q to=%q", f.dynPeriod, f.dynFrom, f.dynTo)
+				if f.dynParams.Period != "daily" || f.dynParams.FromDate != "2026-01-01" || f.dynParams.ToDate != "2026-01-31" {
+					t.Errorf("got params %+v", f.dynParams)
 				}
 			},
 		},
@@ -351,8 +450,11 @@ func TestCallTools(t *testing.T) {
 }
 
 // TestEmptyResults проверяет пустые ответы API: нулевые значения proto3 JSON
-// опускает, поэтому totalCount приходит пустой строкой и должен стать нулём.
+// опускает, поэтому totalCount приходит пустой строкой и должен стать нулём,
+// а hasData — false (спроса нет, это не ошибка).
 func TestEmptyResults(t *testing.T) {
+	emptyStrings := []string{}
+
 	tests := []struct {
 		name       string
 		tool       string
@@ -369,17 +471,26 @@ func TestEmptyResults(t *testing.T) {
 				"Популярные запросы:\n" +
 				"(пусто)\n",
 			wantStruct: mymcp.TopRequestsOutput{
-				Phrase:     "узкая ниша",
-				TotalCount: 0,
-				Requests:   []mymcp.PhraseCount{},
+				Phrase:       "узкая ниша",
+				HasData:      false,
+				TotalCount:   0,
+				Requests:     []mymcp.PhraseCount{},
+				Associations: []mymcp.PhraseCount{},
+				Regions:      emptyStrings,
+				Devices:      emptyStrings,
 			},
 		},
 		{
-			name:       "dynamics без точек",
-			tool:       "dynamics",
-			args:       map[string]any{"phrase": "узкая ниша"},
-			wantText:   "Динамика для «узкая ниша»:\n(пусто)\n",
-			wantStruct: mymcp.DynamicsOutput{Phrase: "узкая ниша", Points: []mymcp.DynamicsPoint{}},
+			name:     "dynamics без точек",
+			tool:     "dynamics",
+			args:     map[string]any{"phrase": "узкая ниша"},
+			wantText: "Динамика для «узкая ниша»:\n(пусто)\n",
+			wantStruct: mymcp.DynamicsOutput{
+				Phrase:  "узкая ниша",
+				Points:  []mymcp.DynamicsPoint{},
+				Regions: emptyStrings,
+				Devices: emptyStrings,
+			},
 		},
 		{
 			name:       "regions без регионов",
@@ -416,8 +527,138 @@ func TestEmptyResults(t *testing.T) {
 	}
 }
 
+// TestHasDataFalse проверяет, что нулевой спрос — это валидный ответ, а не ошибка.
+func TestHasDataFalse(t *testing.T) {
+	fake := newTestFakeClient()
+	fake.topResponse = &wordstat.TopRequestsResponse{TotalCount: "0"}
+
+	session := connect(t, fake)
+
+	res := callTool(t, session, "top_requests", map[string]any{"phrase": "нет такого спроса"})
+	if res.IsError {
+		t.Fatalf("нулевой спрос не должен быть ошибкой: %v", res.Content)
+	}
+
+	out := structuredInto[mymcp.TopRequestsOutput](t, "top_requests", res)
+	if out.HasData {
+		t.Error("hasData = true, want false")
+	}
+	if out.TotalCount != 0 {
+		t.Errorf("totalCount = %d, want 0", out.TotalCount)
+	}
+	if out.Code != "" {
+		t.Errorf("code = %q, want empty: это не сбой", out.Code)
+	}
+}
+
+// TestErrorMapping проверяет маппинг sentinel-ошибок клиента в стабильные коды
+// структурированного ответа.
+func TestErrorMapping(t *testing.T) {
+	truePtr := true
+	falsePtr := false
+
+	tests := []struct {
+		name       string
+		err        error
+		wantCode   string
+		wantRetry  *bool
+		wantCalled bool
+	}{
+		{
+			name:      "невалидный аргумент",
+			err:       errors.New("bad"),
+			wantCode:  mymcp.CodeInvalidArgument,
+			wantRetry: &falsePtr,
+		},
+		{
+			name:      "квота",
+			err:       errors.New("bad"),
+			wantCode:  mymcp.CodeQuotaExceeded,
+			wantRetry: &truePtr,
+		},
+		{
+			name:      "недоступность",
+			err:       errors.New("bad"),
+			wantCode:  mymcp.CodeUpstreamUnavailable,
+			wantRetry: &truePtr,
+		},
+		{
+			name:      "внутренняя ошибка",
+			err:       errors.New("bad"),
+			wantCode:  mymcp.CodeInternal,
+			wantRetry: &falsePtr,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newTestFakeClient()
+
+			switch tt.wantCode {
+			case mymcp.CodeInvalidArgument:
+				fake.err = errors.Join(wordstat.ErrInvalidArgument, tt.err)
+			case mymcp.CodeQuotaExceeded:
+				fake.err = errors.Join(wordstat.ErrQuotaExceeded, tt.err)
+			case mymcp.CodeUpstreamUnavailable:
+				fake.err = errors.Join(wordstat.ErrUnavailable, tt.err)
+			default:
+				fake.err = tt.err
+			}
+
+			session := connect(t, fake)
+
+			res := callTool(t, session, "top_requests", map[string]any{"phrase": "яндекс"})
+			if !res.IsError {
+				t.Fatalf("expected isError = true, got %#v", res.Content)
+			}
+
+			out := structuredInto[mymcp.TopRequestsOutput](t, "top_requests", res)
+			if out.Code != tt.wantCode {
+				t.Errorf("code = %q, want %q", out.Code, tt.wantCode)
+			}
+			if out.Message == "" {
+				t.Error("message is empty")
+			}
+			if out.Retryable == nil {
+				t.Fatal("retryable is nil: поле обязано присутствовать")
+			}
+			if *out.Retryable != *tt.wantRetry {
+				t.Errorf("retryable = %v, want %v", *out.Retryable, *tt.wantRetry)
+			}
+			if len(out.Requests) != 0 {
+				t.Errorf("requests = %v, want empty", out.Requests)
+			}
+		})
+	}
+}
+
+// TestValidationErrorBecomesInvalidArgument проверяет сквозной путь: невалидный
+// регион на входе инструмента даёт code = invalid_argument.
+func TestValidationErrorBecomesInvalidArgument(t *testing.T) {
+	session := connect(t, newTestFakeClient())
+
+	res := callTool(t, session, "top_requests", map[string]any{
+		"phrase":  "зимняя резина",
+		"regions": []any{"abc"},
+	})
+	if !res.IsError {
+		t.Fatalf("expected isError = true, got %#v", res.Content)
+	}
+
+	out := structuredInto[mymcp.TopRequestsOutput](t, "top_requests", res)
+	if out.Code != mymcp.CodeInvalidArgument {
+		t.Errorf("code = %q, want %q", out.Code, mymcp.CodeInvalidArgument)
+	}
+	if !strings.Contains(out.Message, `invalid region "abc"`) {
+		t.Errorf("message = %q, want it to mention the region", out.Message)
+	}
+	if out.Retryable == nil || *out.Retryable {
+		t.Errorf("retryable = %v, want false", out.Retryable)
+	}
+}
+
 // TestUnexpectedCountIsError проверяет, что нечисловой count из API не
-// превращается в тихую ложь, а приводит к ошибке инструмента.
+// превращается в тихую ложь, а приводит к ошибке инструмента с кодом internal.
 func TestUnexpectedCountIsError(t *testing.T) {
 	fake := newTestFakeClient()
 	fake.topResponse = &wordstat.TopRequestsResponse{TotalCount: "много"}
@@ -428,33 +669,12 @@ func TestUnexpectedCountIsError(t *testing.T) {
 	if !res.IsError {
 		t.Fatalf("expected error result, got %#v", res.Content)
 	}
-	text, ok := res.Content[0].(*mcp.TextContent)
-	if !ok {
-		t.Fatalf("content is %T, want *mcp.TextContent", res.Content[0])
+	if text := resultText(t, "top_requests", res); !strings.Contains(text, `"много"`) {
+		t.Errorf("error text %q does not mention the raw value", text)
 	}
-	if !strings.Contains(text.Text, `"много"`) {
-		t.Errorf("error text %q does not mention the raw value", text.Text)
-	}
-}
 
-func TestCallToolPropagatesClientError(t *testing.T) {
-	fake := newTestFakeClient()
-	fake.err = errors.New("unexpected status 400: phrase must not be empty")
-
-	session := connect(t, fake)
-
-	res := callTool(t, session, "top_requests", map[string]any{"phrase": " "})
-	if !res.IsError {
-		t.Fatalf("expected error result, got %#v", res.Content)
-	}
-	if len(res.Content) == 0 {
-		t.Fatal("error result has no content")
-	}
-	text, ok := res.Content[0].(*mcp.TextContent)
-	if !ok {
-		t.Fatalf("content is %T, want *mcp.TextContent", res.Content[0])
-	}
-	if !strings.Contains(text.Text, "phrase must not be empty") {
-		t.Errorf("error text %q does not mention the client error", text.Text)
+	out := structuredInto[mymcp.TopRequestsOutput](t, "top_requests", res)
+	if out.Code != mymcp.CodeInternal {
+		t.Errorf("code = %q, want %q", out.Code, mymcp.CodeInternal)
 	}
 }

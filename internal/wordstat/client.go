@@ -60,19 +60,23 @@ func NewClient(apiKey, folderID string, opts ...Option) *Client {
 }
 
 // do выполняет POST-запрос к указанному методу Wordstat.
+//
+// Ошибки оборачивают sentinel-ошибки (ErrInvalidArgument, ErrQuotaExceeded,
+// ErrUnavailable, ErrInternal), чтобы вызывающий код мог отличить сбой от
+// «данных нет» и понять, стоит ли повторять запрос.
 func (c *Client) do(ctx context.Context, method string, payload any) ([]byte, error) {
 	if err := c.limiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("rate limit: %w", err)
+		return nil, fmt.Errorf("%w: rate limit: %v", ErrUnavailable, err)
 	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		return nil, fmt.Errorf("%w: marshal: %v", ErrInternal, err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+method, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return nil, fmt.Errorf("%w: create request: %v", ErrInternal, err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -80,20 +84,28 @@ func (c *Client) do(ctx context.Context, method string, payload any) ([]byte, er
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("http request: %w", err)
+		return nil, fmt.Errorf("%w: http request: %v", ErrUnavailable, err)
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		return nil, fmt.Errorf("%w: read response: %v", ErrUnavailable, err)
 	}
 
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, fmt.Errorf("quota exceeded (HTTP 429): %s", apiMessage(data))
-	}
+	code, message, hasEnvelope := apiErrorEnvelope(data)
+
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, apiMessage(data))
+		if !hasEnvelope {
+			message = apiMessage(data)
+		}
+		return nil, apiFailure(resp.StatusCode, code, message)
+	}
+
+	// API иногда отдаёт ошибку с HTTP 200. Без этой проверки потребитель
+	// увидел бы «спроса нет» вместо сбоя.
+	if hasEnvelope {
+		return nil, apiFailure(resp.StatusCode, code, message)
 	}
 
 	return data, nil
@@ -106,7 +118,7 @@ func (c *Client) post(ctx context.Context, method string, payload, out any) erro
 		return err
 	}
 	if err := json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("unmarshal %s response: %w", method, err)
+		return fmt.Errorf("%w: unmarshal %s response: %v", ErrInternal, method, err)
 	}
 	return nil
 }
@@ -114,12 +126,8 @@ func (c *Client) post(ctx context.Context, method string, payload, out any) erro
 // apiMessage достаёт человекочитаемое сообщение из ошибки API
 // ({"code":3,"message":"..."}), иначе отдаёт тело как есть.
 func apiMessage(data []byte) string {
-	var apiErr struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(data, &apiErr); err == nil && apiErr.Message != "" {
-		return apiErr.Message
+	if _, message, ok := apiErrorEnvelope(data); ok && message != "" {
+		return message
 	}
 	msg := strings.TrimSpace(string(data))
 	if len(msg) > maxErrBody {
@@ -130,21 +138,38 @@ func apiMessage(data []byte) string {
 
 // TopRequests возвращает топ запросов и ассоциации по фразе (GetTop).
 // numPhrases <= 0 → DefaultNumPhrases (20), > MaxNumPhrases → ошибка.
-func (c *Client) TopRequests(ctx context.Context, phrase string, numPhrases int) (*TopRequestsResponse, error) {
-	if err := validatePhrase(phrase); err != nil {
+func (c *Client) TopRequests(ctx context.Context, params TopParams) (*TopRequestsResponse, error) {
+	if err := validatePhrase(params.Phrase); err != nil {
 		return nil, err
 	}
+
+	numPhrases := params.NumPhrases
 	switch {
 	case numPhrases <= 0:
 		numPhrases = DefaultNumPhrases
 	case numPhrases > MaxNumPhrases:
-		return nil, fmt.Errorf("numPhrases must be in 1..%d, got %d", MaxNumPhrases, numPhrases)
+		return nil, fmt.Errorf("%w: numPhrases must be in 1..%d, got %d", ErrInvalidArgument, MaxNumPhrases, numPhrases)
+	}
+
+	regions, err := ValidateRegions(params.Regions)
+	if err != nil {
+		return nil, err
+	}
+	devices, err := NormalizeDevices(params.Devices)
+	if err != nil {
+		return nil, err
 	}
 
 	payload := map[string]any{
-		"phrase":     phrase,
+		"phrase":     params.Phrase,
 		"numPhrases": numPhrases,
 		"folderId":   c.folderID,
+	}
+	if len(regions) > 0 {
+		payload["regions"] = regions
+	}
+	if len(devices) > 0 {
+		payload["devices"] = devices
 	}
 
 	var result TopRequestsResponse
@@ -152,6 +177,7 @@ func (c *Client) TopRequests(ctx context.Context, phrase string, numPhrases int)
 		return nil, err
 	}
 	result.NumPhrases = numPhrases
+	result.Regions, result.Devices = regions, devices
 	return &result, nil
 }
 
@@ -159,27 +185,42 @@ func (c *Client) TopRequests(ctx context.Context, phrase string, numPhrases int)
 // period: daily | weekly | monthly (по умолчанию monthly).
 // fromDate/toDate: RFC3339 или YYYY-MM-DD; если не заданы, диапазон
 // досчитывается от текущей даты с выравниванием по границам периода.
-func (c *Client) Dynamics(ctx context.Context, phrase, period, fromDate, toDate string) (*DynamicsResponse, error) {
-	if err := validatePhrase(phrase); err != nil {
+func (c *Client) Dynamics(ctx context.Context, params DynamicsParams) (*DynamicsResponse, error) {
+	if err := validatePhrase(params.Phrase); err != nil {
 		return nil, err
 	}
 
-	normalizedPeriod, err := NormalizePeriod(period)
+	normalizedPeriod, err := NormalizePeriod(params.Period)
 	if err != nil {
 		return nil, err
 	}
 
-	from, to, err := ResolveDynamicsRange(normalizedPeriod, fromDate, toDate, c.now())
+	from, to, err := ResolveDynamicsRange(normalizedPeriod, params.FromDate, params.ToDate, c.now())
+	if err != nil {
+		return nil, err
+	}
+
+	regions, err := ValidateRegions(params.Regions)
+	if err != nil {
+		return nil, err
+	}
+	devices, err := NormalizeDevices(params.Devices)
 	if err != nil {
 		return nil, err
 	}
 
 	payload := map[string]any{
-		"phrase":   phrase,
+		"phrase":   params.Phrase,
 		"period":   normalizedPeriod,
 		"fromDate": from,
 		"toDate":   to,
 		"folderId": c.folderID,
+	}
+	if len(regions) > 0 {
+		payload["regions"] = regions
+	}
+	if len(devices) > 0 {
+		payload["devices"] = devices
 	}
 
 	var result DynamicsResponse
@@ -187,6 +228,7 @@ func (c *Client) Dynamics(ctx context.Context, phrase, period, fromDate, toDate 
 		return nil, err
 	}
 	result.Period, result.FromDate, result.ToDate = normalizedPeriod, from, to
+	result.Regions, result.Devices = regions, devices
 	return &result, nil
 }
 
