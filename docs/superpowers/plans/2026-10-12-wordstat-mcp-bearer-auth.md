@@ -29,6 +29,7 @@
 - Лишние пробелы вокруг верного токена (`Bearer   <токен>`) — должны проходить: SDK разбивает заголовок по пробелам. Тест в задаче 1.
 - Заголовок с двумя значениями (`Bearer a, Bearer b`) — должен давать `401`, а не «склеивать» токен. Тест в задаче 1.
 - Запрос с верным session id, но неверным токеном — `401`, то есть токен проверяется раньше сессии. Тест в задаче 2.
+- Авторизованный SSE-стрим не должен залипать: обёртка обязана реализовать `Unwrap() http.ResponseWriter` и `Flush()`, иначе `http.NewResponseController.Flush()` вернёт `ErrNotSupported` и события не уйдут клиенту. Тест в задаче 2 (с таймаутом контекста).
 - `GET /mcp` без авторизации (standalone SSE) — `401`, а не пустой поток. Тест в задаче 1.
 - `/healthz` при пустом токене — `200` (иначе балансировщик снимет контейнер и никто не увидит причину `503`). Тест в задаче 1.
 
@@ -102,7 +103,7 @@ Expected: FAIL — компиляция не проходит (`too many argumen
 
 - [ ] **Step 3: Реализовать `internal/server/auth.go`**
 
-Сигнатуры: `type Options struct{ AuthToken string }`, `func protectMCP(next http.Handler, token string) http.Handler`, `func verifyToken(token string) auth.TokenVerifier`, тип `challengeWriter` c методами `WriteHeader(code int)` (при `401` и пустом `WWW-Authenticate` выставляет `Bearer`) и проксированием `Write`, а также константа `userIDPreShared = "pre-shared"`.
+Сигнатуры: `type Options struct{ AuthToken string }`, `func protectMCP(next http.Handler, token string) http.Handler`, `func verifyToken(token string) auth.TokenVerifier`, тип `challengeWriter` и константа `userIDPreShared = "pre-shared"`. У `challengeWriter` четыре метода: `WriteHeader(code int)` — при `401` и пустом `WWW-Authenticate` выставляет `Bearer`, затем делегирует; `Write` — делегирует; `Unwrap() http.ResponseWriter` — возвращает вложенный writer (нужен `http.NewResponseController` для SSE); `Flush()` — делегирует `Flush` вложенного writer'а, если тот его поддерживает. Без `Unwrap`/`Flush` ломается стриминг — это проверяется тестом задачи 2.
 
 Ветка пустого токена — обработчик, отдающий `http.Error(w, "auth not configured", http.StatusServiceUnavailable)` (это `503`, не `500`). Сравнение — `subtle.ConstantTimeCompare([]byte(presented), []byte(token))`; несовпадение → `auth.ErrInvalidToken` без обёртки; совпадение → `&auth.TokenInfo{UserID: userIDPreShared}`.
 
@@ -147,9 +148,12 @@ func TestAuthorizedMCPSession(t *testing.T) {
 	//     Endpoint: srv.URL + server.MCPPath,
 	//     HTTPClient: &http.Client{Transport: bearerRoundTripper{token: token}},
 	// }
+	// ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second); defer cancel()
 	// initialize → session.ListTools() == 4 инструмента
 	// session.CallTool("top_requests", {"phrase": "яндекс"}) → нет IsError, есть StructuredContent
 	// session.Close() → без ошибки (DELETE тоже авторизован)
+	// таймаут обязателен: если обёртка потеряет Unwrap/Flush, поток залипнет и тест
+	// упадёт по дедлайну, а не повиснет
 }
 
 func TestWrongTokenBeatsSessionID(t *testing.T) {
