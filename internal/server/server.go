@@ -26,8 +26,9 @@ const (
 	ShutdownTimeout = 10 * time.Second
 )
 
-// NewHandler собирает маршруты: MCP по MCPPath, health-check по HealthPath.
-func NewHandler(mcpServer *mcp.Server, logger *slog.Logger) http.Handler {
+// NewHandler собирает маршруты: MCP по MCPPath под Bearer-авторизацией,
+// health-check по HealthPath без неё.
+func NewHandler(mcpServer *mcp.Server, logger *slog.Logger, opts Options) http.Handler {
 	mcpHandler := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return mcpServer },
 		&mcp.StreamableHTTPOptions{
@@ -37,7 +38,7 @@ func NewHandler(mcpServer *mcp.Server, logger *slog.Logger) http.Handler {
 	)
 
 	mux := http.NewServeMux()
-	mux.Handle(MCPPath, mcpHandler)
+	mux.Handle(MCPPath, protectMCP(mcpHandler, opts.AuthToken))
 	mux.HandleFunc(HealthPath, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
@@ -52,10 +53,10 @@ func NewHandler(mcpServer *mcp.Server, logger *slog.Logger) http.Handler {
 // ReadTimeout/WriteTimeout намеренно не заданы: standalone SSE-поток и
 // стриминговые ответы живут дольше одного запроса, и общий WriteTimeout
 // обрывал бы их.
-func New(addr string, mcpServer *mcp.Server, logger *slog.Logger) *http.Server {
+func New(addr string, mcpServer *mcp.Server, logger *slog.Logger, opts Options) *http.Server {
 	return &http.Server{
 		Addr:              addr,
-		Handler:           NewHandler(mcpServer, logger),
+		Handler:           NewHandler(mcpServer, logger, opts),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -63,8 +64,8 @@ func New(addr string, mcpServer *mcp.Server, logger *slog.Logger) *http.Server {
 
 // Run поднимает сервер и работает до отмены ctx, после чего мягко
 // останавливается, давая текущим запросам завершиться.
-func Run(ctx context.Context, addr string, mcpServer *mcp.Server, logger *slog.Logger) error {
-	httpServer := New(addr, mcpServer, logger)
+func Run(ctx context.Context, addr string, mcpServer *mcp.Server, logger *slog.Logger, opts Options) error {
+	httpServer := New(addr, mcpServer, logger, opts)
 
 	errCh := make(chan error, 1)
 	go func() {

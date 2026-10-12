@@ -48,5 +48,5 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	return server.Run(ctx, addr, mcpServer, slog.Default())
+	return server.Run(ctx, addr, mcpServer, slog.Default(), server.Options{})
 }

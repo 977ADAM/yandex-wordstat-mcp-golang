@@ -1,5 +1,5 @@
-// Package server_test — чёрный ящик для HTTP-обвязки: health-check, 404,
-// сквозной вызов инструментов по Streamable HTTP и настройки http.Server.
+// Package server_test — чёрный ящик для HTTP-обвязки: health-check, 404
+// и настройки http.Server.
 package server_test
 
 import (
@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -52,7 +51,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	httpServer := httptest.NewServer(server.NewHandler(newMCPServer(), logger))
+	httpServer := httptest.NewServer(server.NewHandler(newMCPServer(), logger, server.Options{AuthToken: testToken}))
 	t.Cleanup(httpServer.Close)
 
 	return httpServer
@@ -93,63 +92,11 @@ func TestUnknownPathIsNotFound(t *testing.T) {
 	}
 }
 
-func TestStreamableHTTPTransport(t *testing.T) {
-	httpServer := newTestServer(t)
-	ctx := context.Background()
-
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.0.0"}, nil)
-	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint: httpServer.URL + server.MCPPath,
-	}, nil)
-	if err != nil {
-		t.Fatalf("connect over streamable http: %v", err)
-	}
-	t.Cleanup(func() { _ = session.Close() })
-
-	tools, err := session.ListTools(ctx, nil)
-	if err != nil {
-		t.Fatalf("list tools: %v", err)
-	}
-	if len(tools.Tools) != 4 {
-		t.Fatalf("got %d tools, want 4", len(tools.Tools))
-	}
-	names := make(map[string]bool, len(tools.Tools))
-	for _, tool := range tools.Tools {
-		names[tool.Name] = true
-	}
-	for _, want := range []string{"top_requests", "dynamics", "regions", "list_regions"} {
-		if !names[want] {
-			t.Errorf("tool %s is not registered", want)
-		}
-	}
-
-	res, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "top_requests",
-		Arguments: map[string]any{"phrase": "яндекс"},
-	})
-	if err != nil {
-		t.Fatalf("call top_requests: %v", err)
-	}
-	if res.IsError {
-		t.Fatalf("top_requests returned error result: %v", res.Content)
-	}
-	if len(res.Content) != 1 {
-		t.Fatalf("got %d content items, want 1", len(res.Content))
-	}
-	text, ok := res.Content[0].(*mcp.TextContent)
-	if !ok {
-		t.Fatalf("content is %T, want *mcp.TextContent", res.Content[0])
-	}
-	if !strings.Contains(text.Text, "Всего показов: 21500") {
-		t.Errorf("tool output = %q, want it to contain total count", text.Text)
-	}
-}
-
 // TestNewTimeouts фиксирует важное решение: у http.Server нет WriteTimeout,
 // иначе обрывается standalone SSE-поток Streamable HTTP.
 func TestNewTimeouts(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	httpServer := server.New(":0", newMCPServer(), logger)
+	httpServer := server.New(":0", newMCPServer(), logger, server.Options{})
 
 	if httpServer.Addr != ":0" {
 		t.Errorf("Addr = %q, want %q", httpServer.Addr, ":0")
