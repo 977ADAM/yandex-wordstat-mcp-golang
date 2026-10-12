@@ -53,7 +53,9 @@
     недостижимо, а `/healthz` — недоступен. Переменные Wordstat (`WORDSTAT_API_KEY`,
     `WORDSTAT_FOLDER_ID`) сохраняют `:?`: без них сервис неработоспособен в принципе.
 - Генерация: `openssl rand -hex 32` (не менее 32 байт энтропии).
-- Сравнение — `subtle.ConstantTimeCompare`; значение токена не логируется.
+- Сравнение — `subtle.ConstantTimeCompare`; значение токена не логируется. Длина токена
+  секретом не считается: `ConstantTimeCompare` всё равно выходит сразу при разной длине,
+  это осознанно принято (стандартная практика).
 - `serverInfo.version` → `1.3.0`.
 - Скоупы не используются: `Scopes` в `auth.RequireBearerTokenOptions` не задаём, `403` при этом не возникает.
 
@@ -91,8 +93,10 @@
   - иначе `auth.RequireBearerToken(verifyToken(token), opts)(next)`, где `opts` —
     `auth.RequireBearerTokenOptions{AllowMissingExpiration: true}`;
 - `verifyToken(token string) auth.TokenVerifier` — сравнение `subtle.ConstantTimeCompare`,
-  при несовпадении `fmt.Errorf("%w: invalid token", auth.ErrInvalidToken)` (SDK превратит
-  это в `401`), при совпадении `&auth.TokenInfo{UserID: userIDPreShared}`;
+  при несовпадении возвращает **сам** `auth.ErrInvalidToken` (SDK превратит это в `401`;
+  оборачивать сентинел нельзя — его текст «invalid token» уже готов и `%w`-обёртка дала бы
+  тело `invalid token: invalid token`), при совпадении — `&auth.TokenInfo{UserID: userIDPreShared}`;
+  никаких других ошибок верификатор не возвращает (иначе SDK ответит `500`);
 - `challengeWriter` — обёртка `http.ResponseWriter`, добавляющая
   `WWW-Authenticate: Bearer` при `401` (см. §5);
 - константа `userIDPreShared = "pre-shared"`.
