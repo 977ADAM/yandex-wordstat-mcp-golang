@@ -38,6 +38,11 @@ func run() error {
 		addr = server.DefaultAddr
 	}
 
+	token := os.Getenv("WORDSTAT_MCP_TOKEN")
+	if token == "" {
+		slog.Warn("WORDSTAT_MCP_TOKEN is empty: /mcp будет отвечать 503, пока токен не задан")
+	}
+
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "yandex-wordstat-mcp",
 		Version: "1.2.0",
@@ -48,5 +53,5 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	return server.Run(ctx, addr, mcpServer, slog.Default(), server.Options{})
+	return server.Run(ctx, addr, mcpServer, slog.Default(), server.Options{AuthToken: token})
 }
