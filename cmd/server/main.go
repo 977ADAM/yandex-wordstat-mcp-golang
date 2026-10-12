@@ -45,7 +45,7 @@ func run() error {
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "yandex-wordstat-mcp",
-		Version: "1.2.0",
+		Version: "1.3.0",
 	}, nil)
 
 	mymcp.RegisterTools(mcpServer, wordstat.NewClient(apiKey, folderID))
