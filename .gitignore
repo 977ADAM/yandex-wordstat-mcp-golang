@@ -4,5 +4,6 @@
 !.env.example
 
 .superpowers/
+.worktrees/
 
 .DS_Store
