@@ -39,7 +39,7 @@
 **Files:**
 - Create: `internal/server/auth.go`
 - Modify: `internal/server/server.go`
-- Modify: `tests/server/server_test.go:55,152` (новые сигнатуры)
+- Modify: `tests/server/server_test.go` — `newTestServer` (строка ~55), `TestNewTimeouts` (строка ~152), **удалить `TestStreamableHTTPTransport`** (строки 96–145): он ходит в `/mcp` без заголовка и после этой задачи получит `401`; его покрытие переезжает в задачу 2
 - Modify: `cmd/server/main.go:51` (передать `server.Options{}`, чтобы дерево собиралось)
 - Test: `tests/server/auth_test.go`
 
@@ -50,7 +50,8 @@
   - `func NewHandler(mcpServer *mcp.Server, logger *slog.Logger, opts Options) http.Handler`
   - `func New(addr string, mcpServer *mcp.Server, logger *slog.Logger, opts Options) *http.Server`
   - `func Run(ctx context.Context, addr string, mcpServer *mcp.Server, logger *slog.Logger, opts Options) error`
-  - константа `MCPPath`/`HealthPath` без изменений.
+  - константа `MCPPath`/`HealthPath` без изменений;
+  - тестовая константа `testToken = "test-token"` в `tests/server/auth_test.go` — её использует и `server_test.go`, и задача 2 (один пакет `server_test`).
 
 - [ ] **Step 1: Написать падающий тест** — `tests/server/auth_test.go`:
 
@@ -111,12 +112,13 @@ Expected: FAIL — компиляция не проходит (`too many argumen
 
 - [ ] **Step 5: Обновить вызовы, чтобы дерево собиралось**
 
-`cmd/server/main.go` → `server.Run(ctx, addr, mcpServer, slog.Default(), server.Options{})`; `tests/server/server_test.go` → `server.NewHandler(newMCPServer(), logger, server.Options{AuthToken: "test-token"})` и `server.New(":0", newMCPServer(), logger, server.Options{})`.
+`cmd/server/main.go` → `server.Run(ctx, addr, mcpServer, slog.Default(), server.Options{})`.
+`tests/server/server_test.go`: `newTestServer` → `server.NewHandler(newMCPServer(), logger, server.Options{AuthToken: testToken})`; `TestNewTimeouts` → `server.New(":0", newMCPServer(), logger, server.Options{})`; **удалить `TestStreamableHTTPTransport` целиком** — авторизованная версия появится в задаче 2. В `tests/server/auth_test.go` объявить `const testToken = "test-token"`.
 
 - [ ] **Step 6: Прогнать тесты**
 
 Run: `export GOCACHE=/tmp/gocache-dsh && go test ./... -count=1`
-Expected: PASS везде. Примечание: `tests/server/server_test.go` использует httptest без заголовка — тесты транспорта там должны передавать токен, иначе получат `401`.
+Expected: PASS везде. В `tests/server/server_test.go` после шага 5 не остаётся запросов к `/mcp` без заголовка: `TestHealthEndpoint` и `TestUnknownPathIsNotFound` ходят в `/healthz` и `/`, а `TestNewTimeouts` сервер не запускает.
 
 - [ ] **Step 7: Commit**
 
@@ -133,7 +135,7 @@ git commit -m "feat(server): Bearer-мидлварь для /mcp с fail-closed 
 - Test: `tests/server/auth_session_test.go`
 
 **Interfaces:**
-- Consumes: `server.NewHandler`, `server.Options{AuthToken}`, `server.MCPPath`, `mymcp.RegisterTools`, `mcp.NewClient`, `mcp.StreamableClientTransport`.
+- Consumes: `server.NewHandler`, `server.Options{AuthToken}`, `server.MCPPath`, `mymcp.RegisterTools`, `mcp.NewClient`, `mcp.StreamableClientTransport`; хелперы того же пакета — `newMCPServer()` и `testToken` из `tests/server/server_test.go` и `tests/server/auth_test.go`.
 - Produces: ничего для других задач (только регрессионное покрытие).
 
 - [ ] **Step 1: Написать падающий тест**
